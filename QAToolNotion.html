@@ -1,4 +1,35 @@
 <!DOCTYPE html>
+<!--
+  Freedom Grooming QA Tool
+  ========================
+  Version:  1.3.0
+  Date:     2026-04-28
+  Author:   Drew / Anthropic Claude
+
+  Changelog:
+  v1.3.0 (2026-04-28)
+    - Dashboard: custom date filter with This Week / Last Week / This Month / Last Month quick buttons
+    - Dashboard: stats (pass rate, autofails, disputed, agent breakdown) update based on date filter
+    - Review: tickets auto-assigned evenly across all Full+Edit users on CSV upload
+    - Review: "Reviewed — no dispute" button saves reviewed status to Notion
+    - Batch QA: skip tickets already in Notion DB to prevent duplicates
+    - Dashboard: "Remove duplicates" button
+
+  v1.2.0 (2026-04-27)
+    - Hosted on Railway (no local server needed)
+    - Secrets moved to Railway environment variables
+    - AI insights in Reports tab (Claude Sonnet analysis)
+    - Team insight with collapsible agent sections
+    - Three report download options (agent / team / both)
+    - Auto-save to Notion after each ticket scores
+    - Login page with role-based access (Full / Edit / View)
+
+  v1.1.0 (2026-04-22)
+    - Notion sync via Python proxy server
+    - Batch QA with free-tier rate limiting and auto-retry
+    - Dispute workflow with per-category scoring
+    - Agent reports as downloadable ZIP
+-->
 <html lang="en">
 <head>
   <meta charset="UTF-8">
