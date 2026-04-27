@@ -46,13 +46,13 @@ const { useState, useEffect, useRef, useCallback } = React;
 
 
 // ── CONFIG ──────────────────────────────────────────────────────────────
-const NOTION_TOKEN = window.__ENV__.NOTION_TOKEN;
+const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
 const TICKETS_DB_ID = "39722bec0f2e46daa738df31b09781d3";
 const CONFIG_DB_ID = "922db26dc5f54849833b341568f4619d";
 const HARDCODED_SETUP = { ticketsDbId: TICKETS_DB_ID, configDbId: CONFIG_DB_ID };
-const ANTHROPIC_KEY = window.__ENV__.ANTHROPIC_KEY;
+const ANTHROPIC_KEY = (window.__ENV__&&window.__ENV__.ANTHROPIC_KEY)||window.ANTHROPIC_KEY||"";
 const PASS_THRESHOLD = 85;
 
 // Role: "full" = all access, "edit" = can QA + dispute, "view" = read-only
@@ -69,7 +69,7 @@ const USERS = {
 // ── API HELPERS ──────────────────────────────────────────────────────────
 // All external calls go through the local Python proxy (start.py)
 // so there are no CORS issues regardless of how the file is served.
-const PROXY = window.location.origin + "/proxy";
+const PROXY = "http://localhost:3747/proxy";
 
 async function proxyFetch(targetUrl, method, headers, body) {
   // Send API keys in the body wrapper so they don't get blocked by CORS preflight
@@ -240,6 +240,9 @@ async function updateTicketInNotion(pageId, ticket) {
     "Disputes JSON": { rich_text: [{ text: { content: JSON.stringify(ticket.disputes||{}).slice(0,1900) } }] },
     "Saved At":      { rich_text: [{ text: { content: new Date().toISOString() } }] },
   };
+  if(ticket.reviewed!==undefined){
+    props["Comments"] = { rich_text: [{ text: { content: (ticket.reviewed?"[REVIEWED by "+ticket.reviewedBy+" on "+ticket.reviewedAt+"] ":"")+((ticket.comments||"").slice(0,1800)) } }] };
+  }
   await notionAPI(`/v1/pages/${pageId}`, "PATCH", { properties: props });
 }
 
@@ -604,6 +607,10 @@ function App() {
   const [aiInsights,setAiInsights]=useState(null);
   const [aiInsightsLoading,setAiInsightsLoading]=useState(false);
   const [aiInsightsError,setAiInsightsError]=useState("");
+  const [dashFrom,setDashFrom]=useState("");
+  const [dashTo,setDashTo]=useState("");
+  const [reviewedTickets,setReviewedTickets]=useState({});
+  const [savingReviewed,setSavingReviewed]=useState(false);
   const [reviewFilters,setReviewFilters]=useState({week:"",agent:"",auditor:"",disputedOnly:false});
   const [reviewSelected,setReviewSelected]=useState(null);
   const [disputeState,setDisputeState]=useState({});
@@ -673,6 +680,20 @@ function App() {
     setTimeout(function(){setToasts(function(t){return t.filter(function(x){return x.id!==id;});});},3500);
   }
 
+  async function saveReviewed(ticket) {
+    setSavingReviewed(true);
+    try {
+      var updated=Object.assign({},ticket,{reviewed:true,reviewedBy:currentUser.name,reviewedAt:new Date().toISOString()});
+      if(updated.notionPageId){
+        await updateTicketInNotion(updated.notionPageId, updated);
+      }
+      setReviewedTickets(function(r){return Object.assign({},r,{[ticket.id||ticket.ticketId]:true});});
+      setTickets(function(ts){return ts.map(function(t){return (t.id||t.ticketId)===(ticket.id||ticket.ticketId)?updated:t;});});
+      addToast("Marked as reviewed");
+    } catch(e){addToast("Failed: "+e.message,"error");}
+    setSavingReviewed(false);
+  }
+
   async function handleBatchFile(e) {
     var file=e.target.files[0];if(!file)return;
     try {
@@ -681,8 +702,15 @@ function App() {
       if(!rows.length){addToast("Could not parse CSV","error");return;}
       var mapped=rows.map(mapRow).filter(function(r){return r.ticketId&&r.transcript&&r.transcript.length>20;});
       if(!mapped.length){addToast("No tickets with transcripts found. Use the CSV from the Gorgias Python script.","error");return;}
+
+      // Auto-assign evenly across all Full+Edit users
+      var assignable=Object.entries(USERS).filter(function(e){return e[1].role==="full"||e[1].role==="edit";}).map(function(e){return e[1].name;});
+      if(assignable.length>0){
+        mapped=mapped.map(function(t,i){return Object.assign({},t,{reviewer:assignable[i%assignable.length]});});
+      }
+
       setBatchTickets(mapped);setBatchResults([]);setBatchStatus("");
-      addToast(mapped.length+" tickets ready for batch QA");
+      addToast(mapped.length+" tickets ready — auto-assigned across "+assignable.length+" reviewers");
     } catch(err){addToast("File read failed: "+err.message,"error");}
     e.target.value="";
   }
@@ -1936,14 +1964,28 @@ Rules:
                 </div>
               )}
 
-              {/* Save button */}
+              {/* Save dispute button */}
               {(function(){
                 var pendingCount=Object.values(disputeState).filter(function(d){return (d.newScore&&d.justification&&d.justification.trim())||d.removed;}).length;
-                return pendingCount>0&&(
-                  <div style={{position:"sticky",bottom:"16px",zIndex:100}}>
-                    <button onClick={saveDispute} disabled={savingDispute||!isEditor} style={{...btnSuccess,width:"100%",padding:"12px",fontSize:"14px",opacity:savingDispute||!isEditor?0.5:1}}>
-                      {savingDispute?"Saving...":"Save "+pendingCount+" dispute"+(pendingCount!==1?"s":"")+" as "+currentUser.name}
-                    </button>
+                var isReviewed=reviewedTickets[reviewSelected.id||reviewSelected.ticketId]||reviewSelected.reviewed;
+                return(
+                  <div style={{position:"sticky",bottom:"16px",zIndex:100,display:"flex",flexDirection:"column",gap:"8px"}}>
+                    {pendingCount>0&&(
+                      <button onClick={saveDispute} disabled={savingDispute||!isEditor} style={{...btnSuccess,width:"100%",padding:"12px",fontSize:"14px",opacity:savingDispute||!isEditor?0.5:1}}>
+                        {savingDispute?"Saving...":"Save "+pendingCount+" dispute"+(pendingCount!==1?"s":"")+" as "+currentUser.name}
+                      </button>
+                    )}
+                    {isEditor&&!isReviewed&&pendingCount===0&&(
+                      <button onClick={function(){saveReviewed(reviewSelected);}} disabled={savingReviewed}
+                        style={{...ghost,width:"100%",padding:"12px",fontSize:"14px",fontWeight:600,opacity:savingReviewed?0.5:1,background:"var(--color-background-secondary)"}}>
+                        {savingReviewed?"Saving...":"✓ Reviewed — no dispute"}
+                      </button>
+                    )}
+                    {isReviewed&&(
+                      <div style={{textAlign:"center",padding:"10px",fontSize:"12px",color:"var(--color-text-success)",fontWeight:600,background:"var(--color-background-success)",borderRadius:"var(--border-radius-md)",border:"0.5px solid var(--color-border-success)"}}>
+                        ✓ Reviewed by {reviewSelected.reviewedBy||"auditor"} — no dispute
+                      </div>
+                    )}
                   </div>
                 );
               })()}
@@ -1955,82 +1997,121 @@ Rules:
             {/* ── DASHBOARD ── */}
       {view==="dashboard"&&(
         <div>
-          <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(130px,1fr))",gap:"10px",marginBottom:"1.5rem",border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-lg)",overflow:"hidden"}}>
-            {(function(){
-            var aiPassRate=weekTickets.length?Math.round(weekTickets.filter(function(t){return t.passed;}).length/weekTickets.length*100):null;
-            var dispPassRate=weekTickets.length?Math.round(weekTickets.filter(function(t){var _sc=calcDisputedScore(t,matrix);return _sc?(!t.autofail&&_sc.pct>=85):t.passed;}).length/weekTickets.length*100):null;
+          {/* Date filter */}
+          <div style={{...card,marginBottom:"14px",display:"flex",alignItems:"center",gap:"12px",flexWrap:"wrap"}}>
+            <span style={{fontSize:"11px",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.06em",color:"var(--color-text-secondary)"}}>Filter by ticket date</span>
+            <div style={{display:"flex",alignItems:"center",gap:"6px"}}>
+              <span style={{fontSize:"12px",color:"var(--color-text-secondary)"}}>From</span>
+              <input type="date" value={dashFrom} onChange={function(e){setDashFrom(e.target.value);}}
+                style={{fontSize:"12px",padding:"4px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+            </div>
+            <div style={{display:"flex",alignItems:"center",gap:"6px"}}>
+              <span style={{fontSize:"12px",color:"var(--color-text-secondary)"}}>To</span>
+              <input type="date" value={dashTo} onChange={function(e){setDashTo(e.target.value);}}
+                style={{fontSize:"12px",padding:"4px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+            </div>
+            {(dashFrom||dashTo)&&<button onClick={function(){setDashFrom("");setDashTo("");}} style={{...ghost,fontSize:"11px",padding:"3px 10px"}}>Clear</button>}
+            {/* Quick filters */}
+            {[
+              {label:"This week",fn:function(){
+                var d=new Date();var mon=new Date(d);mon.setDate(d.getDate()-(d.getDay()||7)+1);
+                var sun=new Date(mon);sun.setDate(mon.getDate()+6);
+                setDashFrom(mon.toISOString().slice(0,10));setDashTo(sun.toISOString().slice(0,10));
+              }},
+              {label:"Last week",fn:function(){
+                var d=new Date();var mon=new Date(d);mon.setDate(d.getDate()-(d.getDay()||7)+1-7);
+                var sun=new Date(mon);sun.setDate(mon.getDate()+6);
+                setDashFrom(mon.toISOString().slice(0,10));setDashTo(sun.toISOString().slice(0,10));
+              }},
+              {label:"This month",fn:function(){
+                var d=new Date();
+                setDashFrom(new Date(d.getFullYear(),d.getMonth(),1).toISOString().slice(0,10));
+                setDashTo(new Date(d.getFullYear(),d.getMonth()+1,0).toISOString().slice(0,10));
+              }},
+              {label:"Last month",fn:function(){
+                var d=new Date();
+                setDashFrom(new Date(d.getFullYear(),d.getMonth()-1,1).toISOString().slice(0,10));
+                setDashTo(new Date(d.getFullYear(),d.getMonth(),0).toISOString().slice(0,10));
+              }},
+            ].map(function(q){return <button key={q.label} onClick={q.fn} style={{...ghost,fontSize:"11px",padding:"3px 10px"}}>{q.label}</button>;})}
+          </div>
+
+          {/* Stats */}
+          {(function(){
+            var filtered=tickets.filter(function(t){
+              if(!dashFrom&&!dashTo) return true;
+              var cd=(t.createdDate||"").slice(0,10);
+              if(!cd) return true;
+              if(dashFrom&&cd<dashFrom) return false;
+              if(dashTo&&cd>dashTo) return false;
+              return true;
+            });
+            var aiPassRate=filtered.length?Math.round(filtered.filter(function(t){return t.passed;}).length/filtered.length*100):null;
+            var dispPassRate=filtered.length?Math.round(filtered.filter(function(t){var _sc=calcDisputedScore(t,matrix);return _sc?(!t.autofail&&_sc.pct>=85):t.passed;}).length/filtered.length*100):null;
             var stats=[
               {label:"Total QAed",val:tickets.length},
-              {label:"This week",val:weekTickets.length},
+              {label:(dashFrom||dashTo)?"Filtered":"All tickets",val:filtered.length},
               {label:"AI pass rate",val:aiPassRate!==null?aiPassRate+"%":"—",tone:aiPassRate},
               {label:"Final pass rate",val:dispPassRate!==null?dispPassRate+"%":"—",tone:dispPassRate},
-              {label:"Disputed",val:weekTickets.filter(function(t){return t.hasDisputes;}).length},
-              {label:"Autofails",val:weekTickets.filter(function(t){return t.autofail;}).length},
+              {label:"Disputed",val:filtered.filter(function(t){return t.hasDisputes;}).length},
+              {label:"Autofails",val:filtered.filter(function(t){return t.autofail;}).length},
             ];
-            return stats;
-          })().map(function(m){
-              var tone=m.tone!=null?scoreTone(m.tone):null;
-              return <div key={m.label} style={{padding:"1rem 1.25rem",borderRight:"0.5px solid var(--color-border-tertiary)",borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
-                <div style={{fontSize:"10px",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.08em",color:"var(--color-text-secondary)",marginBottom:"6px"}}>{m.label}</div>
-                <div style={{fontSize:"24px",fontWeight:700,color:tone?tone.text:"var(--color-text-primary)"}}>{m.val}</div>
-              </div>;
-            })}
-          </div>
-          <div style={{display:"flex",justifyContent:"flex-end",marginBottom:"12px",gap:"8px"}}>
-            <button onClick={function(){setView("batch");}} style={btnInfo}>New batch QA</button>
-            <button onClick={exportAllCSV} style={ghost}>Export all CSV</button>
-            <button onClick={function(){
-              // Find duplicates — keep the most recent entry for each ticketId
-              var seen={};
-              var deduped=[];
-              var removed=0;
-              // Process newest first so we keep the latest evaluation
-              var sorted=[...tickets].sort(function(a,b){return (b.savedAt||"").localeCompare(a.savedAt||"");});
-              sorted.forEach(function(t){
-                var key=String(t.ticketId).trim();
-                if(!key)return;
-                if(!seen[key]){seen[key]=true;deduped.push(t);}
-                else{removed++;}
-              });
-              if(removed===0){addToast("No duplicates found","warning");return;}
-              if(window.confirm("Found "+removed+" duplicate ticket"+(removed!==1?"s":"")+". Remove them? (Keeps the most recent evaluation for each ticket ID)")){
-                setTickets(deduped);
-                addToast("Removed "+removed+" duplicate"+(removed!==1?"s":"")+" — click Sync to restore from Notion or Save after your next batch to persist");
-              }
-            }} style={{...ghost,color:"var(--color-text-danger)"}}>Remove duplicates</button>
-          </div>
-          {weekTickets.length===0?(
-            <div style={{...card,textAlign:"center",padding:"3rem 2rem"}}>
-              <p style={{color:"var(--color-text-secondary)",fontSize:"14px",margin:"0 0 12px",fontWeight:600}}>No tickets evaluated this week yet</p>
-              <button onClick={function(){setView("batch");}} style={btnInfo}>Run Batch QA</button>
-            </div>
-          ):(
-            <div>
-              {agents.filter(function(a){return weekTickets.some(function(t){return t.agentName===a;});}).length>0&&(
-                <div style={{...card,marginBottom:"14px"}}>
-                  <p style={{margin:"0 0 12px",fontWeight:500,fontSize:"14px"}}>This week by agent</p>
-                  {agents.filter(function(a){return weekTickets.some(function(t){return t.agentName===a;});}).map(function(a){
-                    var ats=weekTickets.filter(function(t){return t.agentName===a;});
-                    var avg=Math.round(ats.reduce(function(s,t){return s+t.finalScore;},0)/ats.length);
-                    var passRate=Math.round(ats.filter(function(t){return t.passed;}).length/ats.length*100);
-                    var tone=scoreTone(avg);
-                    return <div key={a} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
-                      <span style={{fontSize:"13px",fontWeight:500}}>{a}</span>
-                      <div style={{display:"flex",gap:"12px",alignItems:"center"}}>
-                        <span style={{fontSize:"12px",color:"var(--color-text-secondary)"}}>{ats.length} tickets · {passRate}% pass</span>
-                        <span style={{fontSize:"14px",fontWeight:700,color:tone.text,minWidth:"40px",textAlign:"right"}}>{avg}%</span>
-                      </div>
+            return(
+              <div>
+                <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(130px,1fr))",gap:"10px",marginBottom:"1.5rem",border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-lg)",overflow:"hidden"}}>
+                  {stats.map(function(m){
+                    var tone=m.tone!=null?scoreTone(m.tone):null;
+                    return <div key={m.label} style={{padding:"1rem 1.25rem",borderRight:"0.5px solid var(--color-border-tertiary)",borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
+                      <div style={{fontSize:"10px",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.08em",color:"var(--color-text-secondary)",marginBottom:"6px"}}>{m.label}</div>
+                      <div style={{fontSize:"24px",fontWeight:700,color:tone?tone.text:"var(--color-text-primary)"}}>{m.val}</div>
                     </div>;
                   })}
                 </div>
-              )}
-              <div style={card}>
-                <p style={{margin:"0 0 12px",fontWeight:500,fontSize:"14px"}}>All tickets this week</p>
-                <div style={{overflowX:"auto"}}>
-                  <table style={{width:"100%",borderCollapse:"collapse",fontSize:"12px"}}>
+                <div style={{display:"flex",justifyContent:"flex-end",marginBottom:"12px",gap:"8px"}}>
+                  <button onClick={function(){setView("batch");}} style={btnInfo}>New batch QA</button>
+                  <button onClick={exportAllCSV} style={ghost}>Export all CSV</button>
+                  <button onClick={function(){
+                    var seen={};var deduped=[];var removed=0;
+                    var sorted=[...tickets].sort(function(a,b){return (b.savedAt||"").localeCompare(a.savedAt||"");});
+                    sorted.forEach(function(t){var key=String(t.ticketId).trim();if(!key)return;if(!seen[key]){seen[key]=true;deduped.push(t);}else{removed++;}});
+                    if(removed===0){addToast("No duplicates found","warning");return;}
+                    if(window.confirm("Found "+removed+" duplicate ticket"+(removed!==1?"s":"")+". Remove them?")){
+                      setTickets(deduped);addToast("Removed "+removed+" duplicate"+(removed!==1?"s":""));
+                    }
+                  }} style={{...ghost,color:"var(--color-text-danger)"}}>Remove duplicates</button>
+                </div>
+                {filtered.length===0?(
+                  <div style={{...card,textAlign:"center",padding:"3rem 2rem"}}>
+                    <p style={{color:"var(--color-text-secondary)",fontSize:"14px",margin:"0 0 12px",fontWeight:600}}>{dashFrom||dashTo?"No tickets in this date range":"No tickets evaluated yet"}</p>
+                    <button onClick={function(){setView("batch");}} style={btnInfo}>Run Batch QA</button>
+                  </div>
+                ):(
+                  <div>
+                    {agents.filter(function(a){return filtered.some(function(t){return t.agentName===a;});}).length>0&&(
+                      <div style={{...card,marginBottom:"14px"}}>
+                        <p style={{margin:"0 0 12px",fontWeight:500,fontSize:"14px"}}>By agent{(dashFrom||dashTo)?" (filtered)":""}</p>
+                        {agents.filter(function(a){return filtered.some(function(t){return t.agentName===a;});}).map(function(a){
+                          var ats=filtered.filter(function(t){return t.agentName===a;});
+                          var avg=Math.round(ats.reduce(function(s,t){return s+t.finalScore;},0)/ats.length);
+                          var passRate=Math.round(ats.filter(function(t){return t.passed;}).length/ats.length*100);
+                          var tone=scoreTone(avg);
+                          return <div key={a} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0",borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
+                            <span style={{fontSize:"13px",fontWeight:500}}>{a}</span>
+                            <div style={{display:"flex",gap:"12px",alignItems:"center"}}>
+                              <span style={{fontSize:"12px",color:"var(--color-text-secondary)"}}>{ats.length} tickets · {passRate}% pass</span>
+                              <span style={{fontSize:"14px",fontWeight:700,color:tone.text,minWidth:"40px",textAlign:"right"}}>{avg}%</span>
+                            </div>
+                          </div>;
+                        })}
+                      </div>
+                    )}
+                    <div style={card}>
+                      <p style={{margin:"0 0 12px",fontWeight:500,fontSize:"14px"}}>All tickets{(dashFrom||dashTo)?" (filtered)":""}</p>
+                      <div style={{overflowX:"auto"}}>
+                        <table style={{width:"100%",borderCollapse:"collapse",fontSize:"12px"}}>
                     <thead><tr style={{borderBottom:"0.5px solid var(--color-border-tertiary)"}}>{["Agent","Reviewer","Ticket","Subject","Score","Result"].map(function(h){return <th key={h} style={{textAlign:"left",padding:"5px 8px",color:"var(--color-text-secondary)",fontWeight:400,whiteSpace:"nowrap"}}>{h}</th>;})}</tr></thead>
                     <tbody>
-                      {[...weekTickets].reverse().map(function(t){
+                      {[...filtered].reverse().map(function(t){
                         var rb=resultBadge(t);
                         return <tr key={t.id} style={{borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
                           <td style={{padding:"6px 8px",fontWeight:500,whiteSpace:"nowrap"}}>{t.agentName}</td>
@@ -2047,6 +2128,9 @@ Rules:
               </div>
             </div>
           )}
+        </div>
+      );
+    })()}
         </div>
       )}
 
