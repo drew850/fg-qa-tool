@@ -2,12 +2,13 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  1.3.5
+  Version:  1.3.6
   Date:     2026-04-29
 
   Changelog:
-  v1.3.5 (2026-04-29)
-    - Fix: createdDate now correctly saved to Notion during batch QA
+  v1.3.6 (2026-04-29)
+    - Fix: Batch QA preserves pre-assigned reviewer instead of overwriting with logged-in user
+    - Fix: createdDate now saved to Notion during batch QA
     - Fix: Dashboard date filter uses savedAt as fallback when createdDate is blank
   Author:   Drew / Anthropic Claude
 
@@ -836,7 +837,8 @@ function App() {
         var sc=calcScore(parsed.scores||{},matrix);
         var hasAF=(parsed.autofails||[]).length>0;
         newResult={
-          id:Date.now()+i,week:ticketWeekLabel(ticket.createdDate)||week,auditWeek:week,reviewer:activeAuditor||"Batch QA",
+          id:Date.now()+i,week:ticketWeekLabel(ticket.createdDate)||week,auditWeek:week,
+          reviewer:ticket.reviewer||activeAuditor||"Batch QA",
           agentName:ticket.agentName,ticketId:String(ticket.ticketId),ticketUrl:ticket.ticketUrl,
           createdDate:ticket.createdDate||"",
           contactReason:parsed.meta?.contactReason||ticket.contactReason,
