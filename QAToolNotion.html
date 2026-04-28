@@ -2,12 +2,14 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  1.3.1
+  Version:  1.3.3
   Date:     2026-04-28
 
   Changelog:
-  v1.3.1 (2026-04-28)
-    - Fix: PROXY URL now uses relative path (fixes Notion sync on Railway)
+  v1.3.3 (2026-04-28)
+    - Fix: Date filter uses local timezone (PHT) not UTC — weeks now correct
+    - Fix: createdDate comparison strips time portion to avoid timezone boundary issues
+    - Fix: Tickets with no createdDate excluded when filter is active
   Author:   Drew / Anthropic Claude
 
   Changelog:
@@ -2047,36 +2049,51 @@ Rules:
             </div>
             {(dashFrom||dashTo)&&<button onClick={function(){setDashFrom("");setDashTo("");}} style={{...ghost,fontSize:"11px",padding:"3px 10px"}}>Clear</button>}
             {/* Quick filters */}
-            {[
-              {label:"This week",fn:function(){
-                var d=new Date();var mon=new Date(d);mon.setDate(d.getDate()-(d.getDay()||7)+1);
-                var sun=new Date(mon);sun.setDate(mon.getDate()+6);
-                setDashFrom(mon.toISOString().slice(0,10));setDashTo(sun.toISOString().slice(0,10));
-              }},
-              {label:"Last week",fn:function(){
-                var d=new Date();var mon=new Date(d);mon.setDate(d.getDate()-(d.getDay()||7)+1-7);
-                var sun=new Date(mon);sun.setDate(mon.getDate()+6);
-                setDashFrom(mon.toISOString().slice(0,10));setDashTo(sun.toISOString().slice(0,10));
-              }},
-              {label:"This month",fn:function(){
-                var d=new Date();
-                setDashFrom(new Date(d.getFullYear(),d.getMonth(),1).toISOString().slice(0,10));
-                setDashTo(new Date(d.getFullYear(),d.getMonth()+1,0).toISOString().slice(0,10));
-              }},
-              {label:"Last month",fn:function(){
-                var d=new Date();
-                setDashFrom(new Date(d.getFullYear(),d.getMonth()-1,1).toISOString().slice(0,10));
-                setDashTo(new Date(d.getFullYear(),d.getMonth(),0).toISOString().slice(0,10));
-              }},
-            ].map(function(q){return <button key={q.label} onClick={q.fn} style={{...ghost,fontSize:"11px",padding:"3px 10px"}}>{q.label}</button>;})}
+            {(function(){
+              function localDateStr(d){
+                // Format as YYYY-MM-DD in LOCAL time (not UTC)
+                var y=d.getFullYear();
+                var m=String(d.getMonth()+1).padStart(2,"0");
+                var day=String(d.getDate()).padStart(2,"0");
+                return y+"-"+m+"-"+day;
+              }
+              var filters=[
+                {label:"This week",fn:function(){
+                  var d=new Date();
+                  var day=d.getDay()||7; // Mon=1...Sun=7
+                  var mon=new Date(d);mon.setDate(d.getDate()-day+1);
+                  var sun=new Date(mon);sun.setDate(mon.getDate()+6);
+                  setDashFrom(localDateStr(mon));setDashTo(localDateStr(sun));
+                }},
+                {label:"Last week",fn:function(){
+                  var d=new Date();
+                  var day=d.getDay()||7;
+                  var mon=new Date(d);mon.setDate(d.getDate()-day+1-7);
+                  var sun=new Date(mon);sun.setDate(mon.getDate()+6);
+                  setDashFrom(localDateStr(mon));setDashTo(localDateStr(sun));
+                }},
+                {label:"This month",fn:function(){
+                  var d=new Date();
+                  setDashFrom(localDateStr(new Date(d.getFullYear(),d.getMonth(),1)));
+                  setDashTo(localDateStr(new Date(d.getFullYear(),d.getMonth()+1,0)));
+                }},
+                {label:"Last month",fn:function(){
+                  var d=new Date();
+                  setDashFrom(localDateStr(new Date(d.getFullYear(),d.getMonth()-1,1)));
+                  setDashTo(localDateStr(new Date(d.getFullYear(),d.getMonth(),0)));
+                }},
+              ];
+              return filters.map(function(q){return <button key={q.label} onClick={q.fn} style={{...ghost,fontSize:"11px",padding:"3px 10px"}}>{q.label}</button>;});
+            })()}
           </div>
 
           {/* Stats */}
           {(function(){
             var filtered=tickets.filter(function(t){
               if(!dashFrom&&!dashTo) return true;
-              var cd=(t.createdDate||"").slice(0,10);
-              if(!cd) return true;
+              // Use only the date portion (YYYY-MM-DD) — strip time to avoid timezone issues
+              var cd=(t.createdDate||"").replace("T"," ").slice(0,10);
+              if(!cd||cd.length<10) return false;
               if(dashFrom&&cd<dashFrom) return false;
               if(dashTo&&cd>dashTo) return false;
               return true;
