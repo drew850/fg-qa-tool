@@ -2,16 +2,15 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  1.3.7
+  Version:  1.3.8
   Date:     2026-04-29
 
   Changelog:
-  v1.3.7 (2026-04-29)
-    - Review: Added Review Status column (✓ Done / —) in ticket list
-    - Review: Added Review Status filter (All / Reviewed / Not reviewed yet)
-    - Review: Reviewed rows shown with subtle grey background
-    - Review: "Reviewed — no dispute" button only shown to assigned auditor
-    - Review: Non-assigned auditors see "assigned to [name]" message instead
+  v1.3.8 (2026-04-29)
+    - Fix: Justifications now compressed before saving to Notion (was getting truncated/lost)
+    - Fix: parseNotionRow handles both compressed and full justification formats
+    - Review: Review Status column and filter (All/Reviewed/Not reviewed yet)
+    - Review: Reviewed button restricted to assigned auditor only
   Author:   Drew / Anthropic Claude
 
   Changelog:
@@ -260,7 +259,19 @@ async function saveTicketToNotion(dbId, ticket) {
     "Autofail":           { checkbox: !!ticket.autofail },
     "Scores JSON":        { rich_text: rt(JSON.stringify(ticket.aiScores||ticket.scores||{}).slice(0,1900)) },
     "Disputes JSON":      { rich_text: rt(JSON.stringify(ticket.disputes||{}).slice(0,1900)) },
-    "Justifications JSON":{ rich_text: rt(JSON.stringify(ticket.justifications||{}).slice(0,1900)) },
+    "Justifications JSON":{ rich_text: rt((function(){
+      // Compress justifications: keep only reason(r) and improve(i), truncated
+      var cj={};
+      Object.entries(ticket.justifications||{}).forEach(function(e){
+        var k=e[0],v=e[1];
+        if(v&&typeof v==="object"){
+          cj[k]={};
+          if(v.reason)cj[k].r=String(v.reason).slice(0,150);
+          if(v.improve&&v.improve!=="null")cj[k].i=String(v.improve).slice(0,100);
+        }
+      });
+      return JSON.stringify(cj).slice(0,1900);
+    })()) },
     "Comments":           { rich_text: rt((ticket.comments||"").slice(0,1900)) },
     "Transcript":         { rich_text: rt((ticket.transcript||"").slice(0,1900)) },
     "Autofails JSON":     { rich_text: rt(JSON.stringify(ticket.autofails||[]).slice(0,1900)) },
@@ -314,7 +325,20 @@ function parseNotionRow(r) {
   let aiScores = {}, disputes = {}, justifications = {}, autofails = [];
   try { aiScores = JSON.parse(r.scoresJSON || r["Scores JSON"] || "{}"); } catch(e) {}
   try { disputes = JSON.parse((r.disputesJSON||r["Disputes JSON"]||"").replace(/'/g,'"')); } catch(e) {}
-  try { justifications = JSON.parse(r.justificationsJSON || r["Justifications JSON"] || "{}"); } catch(e) {}
+  try {
+    var rawJust = JSON.parse(r.justificationsJSON || r["Justifications JSON"] || "{}");
+    // Handle both compressed format {r,i} and full format {reason,improve}
+    Object.entries(rawJust).forEach(function(e){
+      var k=e[0],v=e[1];
+      if(v&&typeof v==="object"){
+        justifications[k]={
+          reason: v.reason||v.r||"",
+          improve: v.improve||v.i||null,
+          sample: v.sample||null
+        };
+      }
+    });
+  } catch(e) {}
   try { autofails = JSON.parse((r.autofailsJSON||r["Autofails JSON"]||"").replace(/'/g,'"')); } catch(e) {}
   // Support both camelCase (our mapped names) and "Title Case" (direct Notion field names)
   const ticketId  = r.ticketId  || r["Ticket ID"]  || r.title || "";
