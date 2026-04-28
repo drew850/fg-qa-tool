@@ -2,14 +2,13 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  1.3.3
-  Date:     2026-04-28
+  Version:  1.3.5
+  Date:     2026-04-29
 
   Changelog:
-  v1.3.3 (2026-04-28)
-    - Fix: Date filter uses local timezone (PHT) not UTC — weeks now correct
-    - Fix: createdDate comparison strips time portion to avoid timezone boundary issues
-    - Fix: Tickets with no createdDate excluded when filter is active
+  v1.3.5 (2026-04-29)
+    - Fix: createdDate now correctly saved to Notion during batch QA
+    - Fix: Dashboard date filter uses savedAt as fallback when createdDate is blank
   Author:   Drew / Anthropic Claude
 
   Changelog:
@@ -839,6 +838,7 @@ function App() {
         newResult={
           id:Date.now()+i,week:ticketWeekLabel(ticket.createdDate)||week,auditWeek:week,reviewer:activeAuditor||"Batch QA",
           agentName:ticket.agentName,ticketId:String(ticket.ticketId),ticketUrl:ticket.ticketUrl,
+          createdDate:ticket.createdDate||"",
           contactReason:parsed.meta?.contactReason||ticket.contactReason,
           product:parsed.meta?.product||"",ticketResolution:parsed.meta?.ticketResolution||"",
           scores:parsed.scores||{},aiScores:parsed.scores||{},
@@ -2091,8 +2091,9 @@ Rules:
           {(function(){
             var filtered=tickets.filter(function(t){
               if(!dashFrom&&!dashTo) return true;
-              // Use only the date portion (YYYY-MM-DD) — strip time to avoid timezone issues
-              var cd=(t.createdDate||"").replace("T"," ").slice(0,10);
+              // Use createdDate first, fall back to savedAt
+              var raw=t.createdDate||t.savedAt||"";
+              var cd=raw.replace("T"," ").slice(0,10);
               if(!cd||cd.length<10) return false;
               if(dashFrom&&cd<dashFrom) return false;
               if(dashTo&&cd>dashTo) return false;
