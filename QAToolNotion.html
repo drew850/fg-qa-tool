@@ -2,15 +2,17 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  1.3.9
+  Version:  1.4.0
   Date:     2026-04-29
 
   Changelog:
-  v1.3.9 (2026-04-29)
-    - Review: Delete audit button (Full access only) — permanently removes from Notion
-    - Review: Confirmation prompt before deleting
-    - Fix: Justifications compressed before saving to Notion (v1.3.8)
-    - Fix: parseNotionRow handles both compressed and full justification formats
+  v1.4.0 (2026-04-29)
+    - Justifications now stored in 8 dedicated Notion fields (one per category) — no truncation
+    - Justifications JSON kept as compressed fallback for old tickets
+    - Removed 'sample' field from prompt schema — saves ~15% tokens per ticket
+    - parseNotionRow reads per-category fields first, falls back to compressed JSON
+    - Review: Delete audit button (Full access only)
+    - Review: Review Status column and filter
   Author:   Drew / Anthropic Claude
 
   Changelog:
@@ -207,6 +209,14 @@ async function loadTicketsFromNotion(dbId, onStatus) {
     hasDisputes: getProp(page,"Has Disputes")??false, autofail: getProp(page,"Autofail")??false,
     scoresJSON: getProp(page,"Scores JSON")||"{}", disputesJSON: getProp(page,"Disputes JSON")||"{}",
     justificationsJSON: getProp(page,"Justifications JSON")||"{}",
+    ctfNotes:      getProp(page,"CTF Notes")||"",
+    empathyNotes:  getProp(page,"Empathy Notes")||"",
+    fcrNotes:      getProp(page,"FCR Notes")||"",
+    productNotes:  getProp(page,"Product Notes")||"",
+    orderNotes:    getProp(page,"Order Notes")||"",
+    returnsNotes:  getProp(page,"Returns Notes")||"",
+    promoNotes:    getProp(page,"Promo Notes")||"",
+    retentionNotes:getProp(page,"Retention Notes")||"",
     comments: getProp(page,"Comments")||"", transcript: getProp(page,"Transcript")||"",
     autofailsJSON: getProp(page,"Autofails JSON")||"[]", savedAt: getProp(page,"Saved At")||"",
   }));
@@ -260,7 +270,6 @@ async function saveTicketToNotion(dbId, ticket) {
     "Scores JSON":        { rich_text: rt(JSON.stringify(ticket.aiScores||ticket.scores||{}).slice(0,1900)) },
     "Disputes JSON":      { rich_text: rt(JSON.stringify(ticket.disputes||{}).slice(0,1900)) },
     "Justifications JSON":{ rich_text: rt((function(){
-      // Compress justifications: keep only reason(r) and improve(i), truncated
       var cj={};
       Object.entries(ticket.justifications||{}).forEach(function(e){
         var k=e[0],v=e[1];
@@ -272,6 +281,15 @@ async function saveTicketToNotion(dbId, ticket) {
       });
       return JSON.stringify(cj).slice(0,1900);
     })()) },
+    // Per-category notes — full text, no truncation
+    "CTF Notes":       { rich_text: rt(formatNotes(ticket.justifications,"ctf")) },
+    "Empathy Notes":   { rich_text: rt(formatNotes(ticket.justifications,"empathy")) },
+    "FCR Notes":       { rich_text: rt(formatNotes(ticket.justifications,"fcr")) },
+    "Product Notes":   { rich_text: rt(formatNotes(ticket.justifications,"product")) },
+    "Order Notes":     { rich_text: rt(formatNotes(ticket.justifications,"order")) },
+    "Returns Notes":   { rich_text: rt(formatNotes(ticket.justifications,"returns")) },
+    "Promo Notes":     { rich_text: rt(formatNotes(ticket.justifications,"promo")) },
+    "Retention Notes": { rich_text: rt(formatNotes(ticket.justifications,"retention")) },
     "Comments":           { rich_text: rt((ticket.comments||"").slice(0,1900)) },
     "Transcript":         { rich_text: rt((ticket.transcript||"").slice(0,1900)) },
     "Autofails JSON":     { rich_text: rt(JSON.stringify(ticket.autofails||[]).slice(0,1900)) },
@@ -339,6 +357,23 @@ function parseNotionRow(r) {
       }
     });
   } catch(e) {}
+  // Override with per-category notes fields if present (full text, no truncation)
+  var catNoteMap={
+    ctf:"ctfNotes",empathy:"empathyNotes",fcr:"fcrNotes",product:"productNotes",
+    order:"orderNotes",returns:"returnsNotes",promo:"promoNotes",retention:"retentionNotes"
+  };
+  Object.entries(catNoteMap).forEach(function(e){
+    var catId=e[0], field=e[1];
+    var raw=r[field]||r[field.replace(/([A-Z])/g," $1").replace(/^./,function(s){return s.toUpperCase();})+""]||"";
+    if(raw){
+      var parts=raw.split(" | ↑ ");
+      justifications[catId]={
+        reason: parts[0]||"",
+        improve: parts[1]||null,
+        sample: null
+      };
+    }
+  });
   try { autofails = JSON.parse((r.autofailsJSON||r["Autofails JSON"]||"").replace(/'/g,'"')); } catch(e) {}
   // Support both camelCase (our mapped names) and "Title Case" (direct Notion field names)
   const ticketId  = r.ticketId  || r["Ticket ID"]  || r.title || "";
@@ -606,6 +641,15 @@ const T = {
   amber: { text: "#92400e", bg: "#fffbeb", border: "#fde68a" },
   red: { text: "#991b1b", bg: "#fee2e2", border: "#fecaca" }
 };
+function formatNotes(justifications, catId) {
+  var j = justifications && justifications[catId];
+  if (!j) return "";
+  var out = j.reason || j.r || "";
+  var imp = j.improve || j.i || "";
+  if (imp && imp !== "null") out += " | ↑ " + imp;
+  return out.slice(0, 1990);
+}
+
 function scoreTone(pct) { return pct >= 90 ? T.green : pct >= 75 ? T.amber : T.red; }
 function scoreColor(pct) {
   if (pct >= 90) return T.green.text;
@@ -799,7 +843,7 @@ function App() {
     var rubric=matrix.map(function(c,i){return c.label+" ["+scoreOptions[i]+"]: "+c.levels.map(function(l){return l.level+"="+l.definition;}).join(" | ");}).join("\n");
     var afLines=autofailList.map(function(a,i){return (i+1)+". "+a;}).join("\n");
     var scoresSchema=matrix.map(function(c,i){return '"'+c.id+'":"'+scoreOptions[i]+'"';}).join(",");
-    var justSchema=matrix.map(function(c){return '"'+c.id+'":{"reason":"1 sentence","improve":"1 sentence or null","sample":"example or null"}';}).join(",");
+    var justSchema=matrix.map(function(c){return '"'+c.id+'":{"reason":"1-2 sentences","improve":"1 sentence or null"}';}).join(",");
     var cleanTranscript = (ticket.transcript||"")
       .slice(0,8000)
       .replace(/â€™/g,"'").replace(/â€˜/g,"'")
