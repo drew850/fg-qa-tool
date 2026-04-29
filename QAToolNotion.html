@@ -2,8 +2,14 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  1.4.0
-  Date:     2026-04-29
+  Version:  1.4.1
+  Date:     2026-04-30
+
+  Changelog:
+  v1.4.1 (2026-04-30)
+    - Fix: Reviewed status now saved to dedicated Notion fields (Reviewed/Reviewed By/Reviewed At)
+    - Fix: Reviewed status persists across page refreshes via Notion sync
+    - Fix: Removed hack that wrote reviewed status into Comments field
 
   Changelog:
   v1.4.0 (2026-04-29)
@@ -206,7 +212,9 @@ async function loadTicketsFromNotion(dbId, onStatus) {
     subject: getProp(page,"Subject")||"", ticketUrl: getProp(page,"Ticket URL")||"",
     aiScore: getProp(page,"AI Score")??0, finalScore: getProp(page,"Final Score")??0,
     aiPassed: getProp(page,"AI Passed")??false, finalPassed: getProp(page,"Final Passed")??false,
-    hasDisputes: getProp(page,"Has Disputes")??false, autofail: getProp(page,"Autofail")??false,
+    reviewed:      getProp(page,"Reviewed")??false,
+    reviewedBy:    getProp(page,"Reviewed By")||"",
+    reviewedAt:    getProp(page,"Reviewed At")||"",
     scoresJSON: getProp(page,"Scores JSON")||"{}", disputesJSON: getProp(page,"Disputes JSON")||"{}",
     justificationsJSON: getProp(page,"Justifications JSON")||"{}",
     ctfNotes:      getProp(page,"CTF Notes")||"",
@@ -266,6 +274,9 @@ async function saveTicketToNotion(dbId, ticket) {
     "AI Passed":          { checkbox: !!ticket.passed },
     "Final Passed":       { checkbox: !!(ticket.disputedPassed!==undefined?ticket.disputedPassed:ticket.passed) },
     "Has Disputes":       { checkbox: !!ticket.hasDisputes },
+    "Reviewed":           { checkbox: !!ticket.reviewed },
+    "Reviewed By":        { rich_text: rt(ticket.reviewedBy||"") },
+    "Reviewed At":        { rich_text: rt(ticket.reviewedAt||"") },
     "Autofail":           { checkbox: !!ticket.autofail },
     "Scores JSON":        { rich_text: rt(JSON.stringify(ticket.aiScores||ticket.scores||{}).slice(0,1900)) },
     "Disputes JSON":      { rich_text: rt(JSON.stringify(ticket.disputes||{}).slice(0,1900)) },
@@ -308,9 +319,6 @@ async function updateTicketInNotion(pageId, ticket) {
     "Disputes JSON": { rich_text: [{ text: { content: JSON.stringify(ticket.disputes||{}).slice(0,1900) } }] },
     "Saved At":      { rich_text: [{ text: { content: new Date().toISOString() } }] },
   };
-  if(ticket.reviewed!==undefined){
-    props["Comments"] = { rich_text: [{ text: { content: (ticket.reviewed?"[REVIEWED by "+ticket.reviewedBy+" on "+ticket.reviewedAt+"] ":"")+((ticket.comments||"").slice(0,1800)) } }] };
-  }
   await notionAPI(`/v1/pages/${pageId}`, "PATCH", { properties: props });
 }
 
@@ -397,6 +405,9 @@ function parseNotionRow(r) {
     passed:         !!(r.aiPassed    ?? r["AI Passed"]    ?? false),
     disputedPassed: !!(r.finalPassed ?? r["Final Passed"] ?? false),
     hasDisputes:    !!(r.hasDisputes ?? r["Has Disputes"] ?? false),
+    reviewed:       !!(r.reviewed ?? r["Reviewed"] ?? false),
+    reviewedBy:     r.reviewedBy || r["Reviewed By"] || "",
+    reviewedAt:     r.reviewedAt || r["Reviewed At"] || "",
     autofail:       !!(r.autofail    ?? r["Autofail"]     ?? false),
     aiScores, scores: aiScores, disputes, justifications,
     comments:  r.comments  || r["Comments"]  || "",
@@ -808,7 +819,11 @@ function App() {
     try {
       var updated=Object.assign({},ticket,{reviewed:true,reviewedBy:currentUser.name,reviewedAt:new Date().toISOString()});
       if(updated.notionPageId){
-        await updateTicketInNotion(updated.notionPageId, updated);
+        await notionAPI("/v1/pages/"+updated.notionPageId,"PATCH",{properties:{
+          "Reviewed":    {checkbox:true},
+          "Reviewed By": {rich_text:[{text:{content:currentUser.name}}]},
+          "Reviewed At": {rich_text:[{text:{content:updated.reviewedAt}}]},
+        }});
       }
       setReviewedTickets(function(r){return Object.assign({},r,{[ticket.id||ticket.ticketId]:true});});
       setTickets(function(ts){return ts.map(function(t){return (t.id||t.ticketId)===(ticket.id||ticket.ticketId)?updated:t;});});
