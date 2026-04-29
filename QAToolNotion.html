@@ -2,8 +2,14 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  1.4.2
+  Version:  1.4.3
   Date:     2026-04-30
+
+  Changelog:
+  v1.4.3 (2026-04-30)
+    - Fix: D (disputed) badge restored in review list
+    - Fix: Tickets with disputes are shown as reviewed even if Reviewed checkbox is unchecked
+    - Fix: hasDisputes check now also reads from disputes object directly
 
   Changelog:
   v1.4.2 (2026-04-30)
@@ -1964,7 +1970,8 @@ Rules:
                       var dispPassed=dispSc?(!t.autofail&&dispSc.pct>=85):t.passed;
                       var aiTone=scoreTone(t.aiScore||t.finalScore);
                       var dispTone=scoreTone(dispSc?dispSc.pct:(t.aiScore||t.finalScore));
-                      var isReviewed=reviewedTickets[t.id||t.ticketId]||t.reviewed;
+                      var isReviewed=reviewedTickets[t.id||t.ticketId]||t.reviewed||t.hasDisputes||(t.disputes&&Object.keys(t.disputes).length>0);
+                      var hasDisputes=t.hasDisputes||(t.disputes&&Object.keys(t.disputes).length>0);
                       return(
                         <div key={t.id} className="qa-row" style={{display:"grid",gridTemplateColumns:"100px 1fr 1fr 80px 80px 80px 80px 80px",gap:"6px",padding:"8px",borderRadius:"var(--border-radius-md)",marginBottom:"2px",cursor:"pointer",alignItems:"center",background:isReviewed?"var(--color-background-secondary)":"transparent"}}
                           onClick={function(){setReviewSelected(t);setDisputeState({});}}>
@@ -1976,7 +1983,7 @@ Rules:
                           <span style={{fontSize:"12px",fontWeight:600,color:dispTone.text}}>{dispSc?dispSc.pct:(t.aiScore||t.finalScore)}%</span>
                           <div style={{display:"flex",gap:"4px",flexWrap:"wrap"}}>
                             <span style={{fontSize:"10px",fontWeight:700,padding:"1px 6px",borderRadius:"3px",background:dispPassed?T.green.bg:T.red.bg,color:dispPassed?T.green.text:T.red.text,border:"1px solid "+(dispPassed?T.green.border:T.red.border)}}>{dispPassed?"P":"F"}</span>
-                            {t.hasDisputes&&<span style={{fontSize:"10px",fontWeight:700,padding:"1px 6px",borderRadius:"3px",background:T.amber.bg,color:T.amber.text,border:"1px solid "+T.amber.border}}>D</span>}
+                            {hasDisputes&&<span style={{fontSize:"10px",fontWeight:700,padding:"1px 6px",borderRadius:"3px",background:T.amber.bg,color:T.amber.text,border:"1px solid "+T.amber.border}}>D</span>}
                           </div>
                           <div>
                             {isReviewed
