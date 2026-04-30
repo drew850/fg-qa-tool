@@ -2,8 +2,19 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  1.4.6
+  Version:  1.5.0
   Date:     2026-05-01
+
+  Changelog:
+  v1.5.0 (2026-05-01)
+    - Settings panel: gear icon (⚙) in header for Full + Edit users
+    - Settings > Access Control: full user management (Full access only)
+    - Add/remove users, change roles, assign agents per user
+    - Users stored in Notion config DB (key: "users") — live edits, no redeploy needed
+    - First load seeds Notion from hardcoded USERS list automatically
+    - Edit users see Access Control as read-only
+    - Auto-assign on batch upload now reads from live Notion user list
+    - Reviewer Notes added to saveTicketToNotion (was missing)
 
   Changelog:
   v1.4.6 (2026-05-01)
@@ -775,6 +786,15 @@ function App() {
   const [showRptToCal,setShowRptToCal]=useState(false);
   const [rptCalMonth,setRptCalMonth]=useState({from:{y:new Date().getFullYear(),m:new Date().getMonth()+1},to:{y:new Date().getFullYear(),m:new Date().getMonth()+1}});
 
+  // ── SETTINGS STATE ────────────────────────────────────────────────────────
+  const [settingsOpen,setSettingsOpen]=useState(false);
+  const [settingsTab,setSettingsTab]=useState("access");
+  const [userList,setUserList]=useState([]);
+  const [userListDirty,setUserListDirty]=useState(false);
+  const [savingUsers,setSavingUsers]=useState(false);
+  const [newUserForm,setNewUserForm]=useState({email:"",name:"",role:"edit",assignedAgents:[]});
+  const [newUserError,setNewUserError]=useState("");
+
   // ── AUTH HANDLERS ─────────────────────────────────────────────────────────
   function handleLogin(e){
     if(e&&e.preventDefault) e.preventDefault();
@@ -879,8 +899,8 @@ function App() {
       var mapped=rows.map(mapRow).filter(function(r){return r.ticketId&&r.transcript&&r.transcript.length>20;});
       if(!mapped.length){addToast("No tickets with transcripts found. Use the CSV from the Gorgias Python script.","error");return;}
 
-      // Auto-assign evenly across all Full+Edit users
-      var assignable=Object.entries(USERS).filter(function(e){return e[1].role==="full"||e[1].role==="edit";}).map(function(e){return e[1].name;});
+      // Auto-assign evenly across all Full+Edit users (from live user list)
+      var assignable=effectiveUsers.filter(function(u){return u.role==="full"||u.role==="edit";}).map(function(u){return u.name;});
       if(assignable.length>0){
         mapped=mapped.map(function(t,i){return Object.assign({},t,{reviewer:assignable[i%assignable.length]});});
       }
@@ -1511,12 +1531,83 @@ Rules:
     downloadBlob(rows.map(function(r){return r.join(",");}).join("\n"),"qa_export_"+Date.now()+".csv","text/csv;charset=utf-8;");
   }
 
+  // ── USER MANAGEMENT ─────────────────────────────────────────────────────────
+  // Seed from hardcoded USERS if Notion has none yet
+  function hardcodedUsersArray() {
+    return Object.entries(USERS).map(function(e){
+      return {email:e[0],name:e[1].name,role:e[1].role,assignedAgents:[]};
+    });
+  }
+
+  async function loadUsersFromNotion(configDbId) {
+    try {
+      var data = await loadConfigFromNotion(configDbId, "users");
+      if (data && Array.isArray(data) && data.length > 0) {
+        setUserList(data);
+        return data;
+      } else {
+        // First run — seed from hardcoded USERS
+        var seeded = hardcodedUsersArray();
+        setUserList(seeded);
+        return seeded;
+      }
+    } catch(e) {
+      console.error("[QA] loadUsers:", e);
+      setUserList(hardcodedUsersArray());
+      return hardcodedUsersArray();
+    }
+  }
+
+  async function saveUsersToNotion() {
+    if (!notionSetup) return;
+    setSavingUsers(true);
+    try {
+      await saveConfigToNotion(notionSetup.configDbId, "users", userList);
+      setUserListDirty(false);
+      addToast("Access settings saved");
+    } catch(e) {
+      addToast("Save failed: " + e.message, "error");
+    }
+    setSavingUsers(false);
+  }
+
+  function addNewUser() {
+    var em = newUserForm.email.trim().toLowerCase();
+    var nm = newUserForm.name.trim();
+    if (!em) { setNewUserError("Email is required"); return; }
+    if (!nm) { setNewUserError("Name is required"); return; }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(em)) { setNewUserError("Enter a valid email"); return; }
+    if (userList.some(function(u){return u.email===em;})) { setNewUserError("User already exists"); return; }
+    setUserList(function(ul){return ul.concat([{email:em,name:nm,role:newUserForm.role,assignedAgents:newUserForm.assignedAgents||[]}]);});
+    setUserListDirty(true);
+    setNewUserForm({email:"",name:"",role:"edit",assignedAgents:[]});
+    setNewUserError("");
+  }
+
+  function updateUserField(email, field, val) {
+    setUserList(function(ul){return ul.map(function(u){return u.email===email?Object.assign({},u,{[field]:val}):u;});});
+    setUserListDirty(true);
+  }
+
+  function removeUser(email) {
+    if (!window.confirm("Remove "+email+"?
+
+Their tickets will remain in the database but orphaned.")) return;
+    setUserList(function(ul){return ul.filter(function(u){return u.email!==email;});});
+    setUserListDirty(true);
+  }
+
+  // Derive effective user list for app logic — merge Notion users with hardcoded fallback
+  var effectiveUsers = userList.length > 0 ? userList : hardcodedUsersArray();
+
   async function loadAllData(setup) {
     setLoading(true);
     setSyncStatus("Loading tickets from Notion...");
     try {
       const t = await loadTicketsFromNotion(setup.ticketsDbId, setSyncStatus);
       setTickets(Array.isArray(t) ? t : []);
+      setSyncStatus("Loading users...");
+      await loadUsersFromNotion(setup.configDbId);
       setSyncStatus("");
       if (Array.isArray(t) && t.length > 0) {
         addToast("Loaded " + t.length + " tickets");
@@ -1719,6 +1810,7 @@ Rules:
               </span>
               <button onClick={handleLogout} style={{background:"none",border:"none",cursor:"pointer",fontSize:"11px",color:"var(--color-text-secondary)",padding:"0 0 0 4px"}}>Sign out</button>
             </div>
+            {isEditor&&<button onClick={function(){setSettingsOpen(true);}} title="Settings" style={{background:"none",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",cursor:"pointer",fontSize:"15px",padding:"5px 9px",color:"var(--color-text-secondary)",lineHeight:1}}>⚙</button>}
           </div>
         </div>
       </div>
@@ -2821,6 +2913,214 @@ Rules:
               <div><label style={lbl}>L2</label><input style={inp} value={newCtfEntry.l2} onChange={function(e){setNewCtfEntry(function(n){return Object.assign({},n,{l2:e.target.value});});}}/></div>
               <div><label style={lbl}>Definition</label><input style={inp} value={newCtfEntry.definition} onChange={function(e){setNewCtfEntry(function(n){return Object.assign({},n,{definition:e.target.value});});}}/></div>
               <button onClick={function(){addCtfEntry(ctfTab);}} style={btnInfo}>Add</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── SETTINGS PANEL ── */}
+      {settingsOpen&&(
+        <div style={{position:"fixed",inset:0,zIndex:1000,display:"flex",justifyContent:"flex-end"}} onClick={function(e){if(e.target===e.currentTarget)setSettingsOpen(false);}}>
+          {/* Backdrop */}
+          <div style={{position:"absolute",inset:0,background:"rgba(0,0,0,0.3)"}}/>
+          {/* Panel */}
+          <div style={{position:"relative",width:"100%",maxWidth:"560px",height:"100%",background:"var(--color-background-primary)",boxShadow:"-4px 0 24px rgba(0,0,0,0.12)",display:"flex",flexDirection:"column",overflowY:"auto"}}>
+            {/* Panel header */}
+            <div style={{padding:"20px 24px 0",borderBottom:"0.5px solid var(--color-border-tertiary)",marginBottom:"0",flexShrink:0}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"16px"}}>
+                <div>
+                  <h3 style={{margin:"0 0 2px",fontSize:"16px",fontWeight:700}}>Settings</h3>
+                  <p style={{margin:0,fontSize:"12px",color:"var(--color-text-secondary)"}}>Manage access and team configuration</p>
+                </div>
+                <button onClick={function(){setSettingsOpen(false);}} style={{background:"none",border:"none",cursor:"pointer",fontSize:"20px",color:"var(--color-text-secondary)",lineHeight:1,padding:"4px"}}>×</button>
+              </div>
+              {/* Tabs */}
+              <div style={{display:"flex",gap:"0",borderBottom:"none"}}>
+                {[["access","Access Control"]].map(function(tab){
+                  return <button key={tab[0]} onClick={function(){setSettingsTab(tab[0]);}} style={{padding:"8px 16px",border:"none",borderBottom:settingsTab===tab[0]?"2px solid #2563eb":"2px solid transparent",background:"none",cursor:"pointer",fontSize:"13px",fontWeight:settingsTab===tab[0]?600:400,color:settingsTab===tab[0]?"var(--color-text-info)":"var(--color-text-secondary)"}}>
+                    {tab[1]}
+                  </button>;
+                })}
+              </div>
+            </div>
+
+            {/* Panel body */}
+            <div style={{padding:"20px 24px",flex:1,overflowY:"auto"}}>
+
+              {/* ── ACCESS CONTROL TAB ── */}
+              {settingsTab==="access"&&(
+                <div>
+                  {/* Read-only notice for Edit users */}
+                  {!isFullAccess&&(
+                    <div style={{padding:"10px 14px",background:"var(--color-background-info)",border:"0.5px solid var(--color-border-info)",borderRadius:"var(--border-radius-md)",fontSize:"12px",color:"var(--color-text-info)",marginBottom:"16px"}}>
+                      You have view-only access to this page. Contact Drew to make changes.
+                    </div>
+                  )}
+
+                  {/* User table */}
+                  <div style={{marginBottom:"20px"}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"10px"}}>
+                      <span style={{fontSize:"11px",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.07em",color:"var(--color-text-secondary)"}}>Team members ({userList.length})</span>
+                      {isFullAccess&&userListDirty&&(
+                        <span style={{fontSize:"11px",color:"var(--color-text-warning)",fontWeight:600}}>● Unsaved changes</span>
+                      )}
+                    </div>
+                    <div style={{border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-lg)",overflow:"hidden"}}>
+                      {/* Table header */}
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 100px 80px",gap:"0",padding:"8px 14px",background:"var(--color-background-secondary)",borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
+                        {["Name / Email","Agents","Role",""].map(function(h,i){return <span key={i} style={{fontSize:"10px",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.07em",color:"var(--color-text-secondary)"}}>{h}</span>;})}
+                      </div>
+                      {/* Rows */}
+                      {userList.length===0&&(
+                        <div style={{padding:"20px",textAlign:"center",fontSize:"13px",color:"var(--color-text-secondary)"}}>No users yet. Add one below.</div>
+                      )}
+                      {userList.map(function(u,idx){
+                        var initials=u.name.split(" ").map(function(w){return w[0];}).join("").slice(0,2).toUpperCase();
+                        var isCurrentUser=currentUser&&u.email===currentUser.email;
+                        return(
+                          <div key={u.email} style={{display:"grid",gridTemplateColumns:"1fr 1fr 100px 80px",gap:"0",padding:"12px 14px",borderBottom:idx<userList.length-1?"0.5px solid var(--color-border-tertiary)":"none",alignItems:"center",background:isCurrentUser?"var(--color-background-info)":"transparent"}}>
+                            {/* Name + email */}
+                            <div style={{display:"flex",alignItems:"center",gap:"10px"}}>
+                              <div style={{width:"30px",height:"30px",borderRadius:"50%",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"11px",fontWeight:700,color:"var(--color-text-secondary)",flexShrink:0}}>
+                                {initials}
+                              </div>
+                              <div style={{minWidth:0}}>
+                                <div style={{fontSize:"13px",fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{u.name}{isCurrentUser&&<span style={{fontSize:"10px",marginLeft:"6px",color:"var(--color-text-info)",fontWeight:600}}>(you)</span>}</div>
+                                <div style={{fontSize:"11px",color:"var(--color-text-secondary)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{u.email}</div>
+                              </div>
+                            </div>
+                            {/* Assigned agents */}
+                            <div style={{fontSize:"12px",color:"var(--color-text-secondary)",paddingRight:"8px"}}>
+                              {isFullAccess?(
+                                <div>
+                                  <select
+                                    multiple
+                                    value={u.assignedAgents||[]}
+                                    onChange={function(e){
+                                      var selected=Array.from(e.target.selectedOptions).map(function(o){return o.value;});
+                                      updateUserField(u.email,"assignedAgents",selected);
+                                    }}
+                                    style={{width:"100%",fontSize:"11px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"4px",padding:"2px",minHeight:"36px",maxHeight:"60px"}}
+                                  >
+                                    {agents.map(function(a){return <option key={a} value={a}>{a}</option>;})}
+                                  </select>
+                                  {(!agents||agents.length===0)&&<span style={{fontSize:"11px",color:"var(--color-text-secondary)",fontStyle:"italic"}}>No agents yet</span>}
+                                </div>
+                              ):(
+                                <span>{(u.assignedAgents&&u.assignedAgents.length>0)?u.assignedAgents.join(", "):"—"}</span>
+                              )}
+                            </div>
+                            {/* Role */}
+                            <div>
+                              {isFullAccess&&!isCurrentUser?(
+                                <select
+                                  value={u.role}
+                                  onChange={function(e){updateUserField(u.email,"role",e.target.value);}}
+                                  style={{fontSize:"12px",padding:"4px 6px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"4px",width:"90px"}}
+                                >
+                                  <option value="full">Full</option>
+                                  <option value="edit">Edit</option>
+                                  <option value="view">View</option>
+                                </select>
+                              ):(
+                                <span style={{fontSize:"11px",fontWeight:700,padding:"2px 8px",borderRadius:"3px",
+                                  background:u.role==="full"?"var(--color-background-info)":u.role==="edit"?"var(--color-background-success)":"var(--color-background-secondary)",
+                                  color:u.role==="full"?"var(--color-text-info)":u.role==="edit"?"var(--color-text-success)":"var(--color-text-secondary)",
+                                  border:"0.5px solid "+(u.role==="full"?"var(--color-border-info)":u.role==="edit"?"var(--color-border-success)":"var(--color-border-secondary)")
+                                }}>{u.role==="full"?"Full":u.role==="edit"?"Edit":"View"}</span>
+                              )}
+                            </div>
+                            {/* Remove */}
+                            <div style={{textAlign:"right"}}>
+                              {isFullAccess&&!isCurrentUser?(
+                                <button onClick={function(){removeUser(u.email);}} style={{background:"none",border:"none",cursor:"pointer",fontSize:"12px",color:"var(--color-text-danger)",padding:"4px 6px"}}>Remove</button>
+                              ):(
+                                <span style={{fontSize:"11px",color:"var(--color-text-secondary)"}}>{isCurrentUser?"—":""}</span>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Add user form — Full access only */}
+                  {isFullAccess&&(
+                    <div style={{border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-lg)",padding:"16px",marginBottom:"20px"}}>
+                      <p style={{margin:"0 0 12px",fontSize:"13px",fontWeight:600}}>Add team member</p>
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"10px",marginBottom:"10px"}}>
+                        <div>
+                          <label style={{fontSize:"11px",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.07em",color:"var(--color-text-secondary)",display:"block",marginBottom:"5px"}}>Email *</label>
+                          <input
+                            type="email"
+                            placeholder="name@myfreebird.com"
+                            value={newUserForm.email}
+                            onChange={function(e){setNewUserForm(function(f){return Object.assign({},f,{email:e.target.value});});setNewUserError("");}}
+                            style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}
+                          />
+                        </div>
+                        <div>
+                          <label style={{fontSize:"11px",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.07em",color:"var(--color-text-secondary)",display:"block",marginBottom:"5px"}}>Display name *</label>
+                          <input
+                            type="text"
+                            placeholder="First Last"
+                            value={newUserForm.name}
+                            onChange={function(e){setNewUserForm(function(f){return Object.assign({},f,{name:e.target.value});});setNewUserError("");}}
+                            style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}
+                          />
+                        </div>
+                      </div>
+                      <div style={{marginBottom:"10px"}}>
+                        <label style={{fontSize:"11px",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.07em",color:"var(--color-text-secondary)",display:"block",marginBottom:"5px"}}>Role</label>
+                        <select
+                          value={newUserForm.role}
+                          onChange={function(e){setNewUserForm(function(f){return Object.assign({},f,{role:e.target.value});});}}
+                          style={{fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",width:"160px"}}
+                        >
+                          <option value="full">Full — all access</option>
+                          <option value="edit">Edit — QA + dispute</option>
+                          <option value="view">View — read-only</option>
+                        </select>
+                      </div>
+                      {newUserError&&<p style={{margin:"0 0 8px",fontSize:"12px",color:"var(--color-text-danger)"}}>{newUserError}</p>}
+                      <button onClick={addNewUser} style={{...btnInfo,fontSize:"12px",padding:"6px 16px"}}>Add user</button>
+                    </div>
+                  )}
+
+                  {/* Role legend */}
+                  <div style={{padding:"14px",background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)",fontSize:"12px",marginBottom:"20px"}}>
+                    <p style={{margin:"0 0 8px",fontWeight:600,fontSize:"12px"}}>Role permissions</p>
+                    {[
+                      ["Full","All access — tickets, disputes, reports, matrix, settings, delete audits"],
+                      ["Edit","QA tickets, dispute scores, review assigned tickets, generate reports"],
+                      ["View","Read-only — can view all data but cannot make changes"],
+                    ].map(function(r){
+                      return <div key={r[0]} style={{display:"flex",gap:"8px",alignItems:"flex-start",marginBottom:"6px"}}>
+                        <span style={{fontSize:"10px",fontWeight:700,padding:"2px 7px",borderRadius:"3px",whiteSpace:"nowrap",marginTop:"1px",
+                          background:r[0]==="Full"?"var(--color-background-info)":r[0]==="Edit"?"var(--color-background-success)":"var(--color-background-secondary)",
+                          color:r[0]==="Full"?"var(--color-text-info)":r[0]==="Edit"?"var(--color-text-success)":"var(--color-text-secondary)",
+                          border:"0.5px solid "+(r[0]==="Full"?"var(--color-border-info)":r[0]==="Edit"?"var(--color-border-success)":"var(--color-border-secondary)")
+                        }}>{r[0]}</span>
+                        <span style={{color:"var(--color-text-secondary)",lineHeight:"1.5"}}>{r[1]}</span>
+                      </div>;
+                    })}
+                  </div>
+
+                  {/* Save button — Full only */}
+                  {isFullAccess&&(
+                    <div style={{display:"flex",justifyContent:"flex-end",gap:"10px",alignItems:"center"}}>
+                      {userListDirty&&<span style={{fontSize:"12px",color:"var(--color-text-secondary)"}}>You have unsaved changes</span>}
+                      <button
+                        onClick={saveUsersToNotion}
+                        disabled={savingUsers||!userListDirty}
+                        style={{...btnInfo,opacity:savingUsers||!userListDirty?0.5:1,padding:"8px 20px",fontSize:"13px",fontWeight:600}}
+                      >
+                        {savingUsers?"Saving...":"Save changes"}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
         </div>
