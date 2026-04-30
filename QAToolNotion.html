@@ -2,8 +2,14 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  1.5.4
+  Version:  1.5.5
   Date:     2026-05-01
+
+  Changelog:
+  v1.5.5 (2026-05-01)
+    - Fix: Agent report summary fallback now builds a real data-driven summary
+      when Claude API is unavailable (references actual scores, strengths, gaps, pass rate)
+    - Previously showed a single generic sentence regardless of performance
 
   Changelog:
   v1.5.4 (2026-05-01)
@@ -1185,8 +1191,48 @@ function App() {
       summaryText=(summaryText||"").replace(/```/g,"").trim();
       summaryHTML="<div style='font-size:13px;color:#374151;line-height:1.85;margin-bottom:36px;padding:20px 24px;background:#f9fafb;border-radius:10px;border-left:3px solid #d1d5db;'>"+summaryText.replace(/\n/g,"<br/>")+"</div>";
     } catch(e) {
-      // Fallback if Claude call fails
-      summaryHTML="<div style='font-size:13px;color:#374151;line-height:1.85;margin-bottom:36px;padding:20px 24px;background:#f9fafb;border-radius:10px;border-left:3px solid #d1d5db;'>"+firstName+" completed "+agentTickets.length+" tickets this period with an average score of "+avg+"%. "+passed+" of "+agentTickets.length+" tickets passed the 85% threshold.</div>";
+      // Fallback: rule-based summary built from actual data
+      var passRate=Math.round(passed/agentTickets.length*100);
+      var catData=matrix.map(function(c){
+        var app=agentTickets.filter(function(t){var v=(t.scores&&t.scores[c.id])||"";return v&&v!=="NA";});
+        if(!app.length)return null;
+        var p=app.filter(function(t){return catLbl((t.scores&&t.scores[c.id])||"")==="Pass";}).length;
+        return {label:c.label,pct:Math.round(p/app.length*100)};
+      }).filter(Boolean);
+      var strengths=catData.filter(function(c){return c.pct>=90;}).map(function(c){return c.label+" ("+c.pct+"%)";});
+      var gaps=catData.filter(function(c){return c.pct<75;}).sort(function(a,b){return a.pct-b.pct;}).map(function(c){return c.label+" ("+c.pct+"%)";});
+      var topCat=catData.slice().sort(function(a,b){return b.pct-a.pct;})[0];
+      var bottomCat=catData.slice().sort(function(a,b){return a.pct-b.pct;})[0];
+
+      var s1=firstName+" reviewed "+agentTickets.length+" ticket"+(agentTickets.length!==1?"s":"")+" this period, finishing with an average score of "+avg+"% and a "+passRate+"% pass rate.";
+
+      var s2="";
+      if(strengths.length>0){
+        s2=" "+firstName+" showed strong consistency in "+strengths.slice(0,2).join(" and ")+", which reflects well on both process adherence and customer handling.";
+      } else if(topCat){
+        s2=" "+firstName+"'s strongest area was "+topCat.label+" at "+topCat.pct+"%, showing solid performance in that category.";
+      }
+
+      var s3="";
+      if(autofails>0){
+        s3=" There "+(autofails===1?"was":"were")+" "+autofails+" autofail"+(autofails!==1?"s":"")+" this period — reviewing those tickets closely will be the most important step for improvement.";
+      } else if(gaps.length>0){
+        s3=" The key focus area going forward is "+gaps[0]+" — consistent improvement here will have the biggest impact on overall scores.";
+      } else if(bottomCat&&bottomCat.pct<90){
+        s3=" "+bottomCat.label+" at "+bottomCat.pct+"% is the area with the most room to grow, and addressing it will push scores higher.";
+      }
+
+      var s4="";
+      if(passRate>=85){
+        s4=" Keep up the strong work — the team and customers both benefit from this level of consistency.";
+      } else if(passRate>=70){
+        s4=" With a few targeted improvements, "+firstName+" is well-positioned to hit consistent passing scores.";
+      } else {
+        s4=" There is clear opportunity ahead, and focused coaching on the key gaps will make a real difference in the coming weeks.";
+      }
+
+      var fallbackText=s1+s2+s3+s4;
+      summaryHTML="<div style='font-size:13px;color:#374151;line-height:1.85;margin-bottom:36px;padding:20px 24px;background:#f9fafb;border-radius:10px;border-left:3px solid #d1d5db;'>"+fallbackText+"</div>";
     }
 
     // Ticket cards — with disputed score handling and winning notes
