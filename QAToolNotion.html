@@ -2,8 +2,14 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  1.4.3
+  Version:  1.4.4
   Date:     2026-04-30
+
+  Changelog:
+  v1.4.4 (2026-04-30)
+    - Fix: Dashboard Disputed count now checks disputes object directly (not just hasDisputes checkbox)
+    - Fix: Dashboard Autofails count now checks autofails array directly (not just autofail checkbox)
+    - Mirrors same fix applied to Review tab D badge in v1.4.3
 
   Changelog:
   v1.4.3 (2026-04-30)
@@ -1145,8 +1151,8 @@ function App() {
     var totalTickets=filtered.length;
     var totalPass=filtered.filter(function(t){return t.passed;}).length;
     var totalPassRate=Math.round(totalPass/totalTickets*100);
-    var totalAutofails=filtered.filter(function(t){return t.autofail;}).length;
-    var totalDisputed=filtered.filter(function(t){return t.hasDisputes;}).length;
+    var totalAutofails=filtered.filter(function(t){return t.autofail||(t.autofails&&t.autofails.length>0);}).length;
+    var totalDisputed=filtered.filter(function(t){return t.hasDisputes||(t.disputes&&Object.keys(t.disputes).length>0);}).length;
     var teamAvg=Math.round(filtered.reduce(function(s,t){return s+t.finalScore;},0)/totalTickets);
 
     function sc(pct){if(pct>=90)return{t:"#166534",bg:"#f0fdf4",b:"#bbf7d0"};if(pct>=75)return{t:"#92400e",bg:"#fffbeb",b:"#fde68a"};return{t:"#991b1b",bg:"#fee2e2",b:"#fecaca"};}
@@ -2287,8 +2293,8 @@ Rules:
               {label:(dashFrom||dashTo)?"Filtered":"All tickets",val:filtered.length},
               {label:"AI pass rate",val:aiPassRate!==null?aiPassRate+"%":"—",tone:aiPassRate},
               {label:"Final pass rate",val:dispPassRate!==null?dispPassRate+"%":"—",tone:dispPassRate},
-              {label:"Disputed",val:filtered.filter(function(t){return t.hasDisputes;}).length},
-              {label:"Autofails",val:filtered.filter(function(t){return t.autofail;}).length},
+              {label:"Disputed",val:filtered.filter(function(t){return t.hasDisputes||(t.disputes&&Object.keys(t.disputes).length>0);}).length},
+              {label:"Autofails",val:filtered.filter(function(t){return t.autofail||(t.autofails&&t.autofails.length>0);}).length},
             ];
             return(
               <div>
@@ -2658,8 +2664,8 @@ Rules:
                     {label:"Team avg",val:teamAvg+"%",tone:teamTone},
                     {label:"Tickets",val:filtered.length,tone:null},
                     {label:"Pass rate",val:teamPass+"%",tone:scoreTone(teamPass)},
-                    {label:"Autofails",val:filtered.filter(function(t){return t.autofail;}).length,tone:null},
-                    {label:"Disputed",val:filtered.filter(function(t){return t.hasDisputes;}).length,tone:null},
+                    {label:"Autofails",val:filtered.filter(function(t){return t.autofail||(t.autofails&&t.autofails.length>0);}).length,tone:null},
+                    {label:"Disputed",val:filtered.filter(function(t){return t.hasDisputes||(t.disputes&&Object.keys(t.disputes).length>0);}).length,tone:null},
                   ].map(function(m){
                     return <div key={m.label} style={{background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)",padding:"12px 14px"}}>
                       <div style={{fontSize:"10px",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.06em",color:"var(--color-text-secondary)",marginBottom:"4px"}}>{m.label}</div>
