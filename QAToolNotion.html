@@ -2,8 +2,18 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  1.5.1
+  Version:  1.5.2
   Date:     2026-05-01
+
+  Changelog:
+  v1.5.2 (2026-05-01)
+    - Agent reports: Section 3 now AI-generated performance summary (Claude Haiku)
+    - Agent reports: Summary based on category scores + auditor comments + reviewer notes
+    - Agent reports: Disputed tickets show AI score crossed out -> Final score with Disputed label
+    - Agent reports: Per-category chips show winning notes (dispute justification if disputed, AI notes if not)
+    - Agent reports: Reviewer notes shown in separate labeled box per ticket card
+    - Agent reports: Header stats expanded to include Passed / Failed / Autofails count
+    - Agent reports: ZIP generators updated to await async AI summary per agent
 
   Changelog:
   v1.5.1 (2026-05-01)
@@ -1092,7 +1102,7 @@ function App() {
     downloadBlob(rows.map(function(r){return r.join(",");}).join("\n"),"qa_batch_"+Date.now()+".csv","text/csv;charset=utf-8;");
   }
 
-  function buildAgentReportHTML(agentName, fromVal, toVal) {
+  async function buildAgentReportHTML(agentName, fromVal, toVal, onStatus) {
     var agentTickets = tickets.filter(function(t) {
       if(t.agentName !== agentName) return false;
       var created = (t.createdDate||"").slice(0,10);
@@ -1106,8 +1116,10 @@ function App() {
     var highest = Math.max.apply(null, agentTickets.map(function(t){return t.finalScore;}));
     var lowest = Math.min.apply(null, agentTickets.map(function(t){return t.finalScore;}));
     var passed = agentTickets.filter(function(t){return t.passed;}).length;
+    var failed = agentTickets.filter(function(t){return !t.passed&&!t.autofail;}).length;
+    var autofails = agentTickets.filter(function(t){return t.autofail||(t.autofails&&t.autofails.length>0);}).length;
     var auditors = [...new Set(agentTickets.map(function(t){return t.reviewer;}).filter(Boolean))].join(", ");
-    var dateLabel = fromVal && toVal ? fromVal+" – "+toVal : fromVal ? "From "+fromVal : toVal ? "Up to "+toVal : (agentTickets[agentTickets.length-1]&&agentTickets[agentTickets.length-1].week)||"All time";
+    var dateLabel = fromVal && toVal ? fromVal+" - "+toVal : fromVal ? "From "+fromVal : toVal ? "Up to "+toVal : (agentTickets[agentTickets.length-1]&&agentTickets[agentTickets.length-1].week)||"All time";
     var firstName = agentName.split(" ")[0];
 
     function sc(pct){if(pct>=90)return{t:"#166534",bg:"#f0fdf4",b:"#bbf7d0"};if(pct>=75)return{t:"#92400e",bg:"#fffbeb",b:"#fde68a"};return{t:"#991b1b",bg:"#fee2e2",b:"#fecaca"};}
@@ -1116,6 +1128,7 @@ function App() {
 
     var tone=sc(avg);
 
+    // Category performance bars
     var catSummary=matrix.map(function(c){
       var app=agentTickets.filter(function(t){var v=(t.scores&&t.scores[c.id])||"";return v&&v!=="NA";});
       if(!app.length)return null;
@@ -1124,16 +1137,138 @@ function App() {
       return "<div style='margin-bottom:10px;'><div style='display:flex;justify-content:space-between;margin-bottom:3px;'><span style='font-size:12px;font-weight:500;'>"+c.label+"</span><span style='font-size:12px;font-weight:700;color:"+tone2.t+";'>"+pct+"%</span></div><div style='height:5px;background:#f3f4f6;border-radius:3px;overflow:hidden;'><div style='height:100%;width:"+pct+"%;background:"+tone2.t+";border-radius:3px;'></div></div></div>";
     }).filter(Boolean).join("");
 
+    // Build data summary for AI summary generation
+    var catStats=matrix.map(function(c){
+      var app=agentTickets.filter(function(t){var v=(t.scores&&t.scores[c.id])||"";return v&&v!=="NA";});
+      if(!app.length)return null;
+      var pass=app.filter(function(t){return catLbl((t.scores&&t.scores[c.id])||"")==="Pass";}).length;
+      var partial=app.filter(function(t){return catLbl((t.scores&&t.scores[c.id])||"")==="Partial";}).length;
+      var miss=app.filter(function(t){return catLbl((t.scores&&t.scores[c.id])||"")==="Miss";}).length;
+      return c.label+": "+Math.round(pass/app.length*100)+"% pass ("+pass+" pass, "+partial+" partial, "+miss+" miss of "+app.length+" applicable)";
+    }).filter(Boolean).join("\n");
+
+    // Collect auditor comments + reviewer notes from all tickets
+    var allComments=agentTickets.map(function(t){
+      var parts=[];
+      if(t.comments&&t.comments.trim()){parts.push("Ticket #"+t.ticketId+" ("+t.finalScore+"% "+( t.passed?"Pass":"Fail")+") AI comments: "+t.comments.trim());}
+      if(t.reviewerNotes&&t.reviewerNotes.trim()){parts.push("Ticket #"+t.ticketId+" reviewer notes: "+t.reviewerNotes.trim());}
+      return parts.join(" | ");
+    }).filter(Boolean).join("\n");
+
+    // Generate AI performance summary
+    if(onStatus) onStatus("Generating summary for "+agentName+"...");
+    var summaryHTML="";
+    try {
+      var summaryPrompt="You are writing a QA performance summary for "+agentName+" (first name: "+firstName+") at Freedom Grooming, a subscription grooming brand. This summary will be included in their formal QA report and read by the agent."
+        +"\n\nPERIOD: "+dateLabel
+        +"\nTICKETS REVIEWED: "+agentTickets.length+" | PASSED: "+passed+" | FAILED: "+failed+(autofails>0?" | AUTOFAILS: "+autofails:"")+" | AVERAGE SCORE: "+avg+"%"
+        +"\n\nCATEGORY PERFORMANCE:\n"+catStats
+        +(allComments?"\n\nAUDITOR COMMENTS AND REVIEWER NOTES:\n"+allComments:"")
+        +"\n\nWrite a 3-4 sentence performance summary for "+firstName+". Rules:"
+        +"\n- Positive, motivational, and professional tone — this is shared with the agent"
+        +"\n- Acknowledge genuine strengths with specific category references and numbers"
+        +"\n- Frame opportunities for improvement constructively — what to focus on, not what went wrong"
+        +"\n- If there are autofails or a low pass rate, address it honestly but supportively"
+        +"\n- Reference actual data (scores, categories, pass rate) — no generic statements"
+        +"\n- Do NOT use bullet points. Write in flowing prose only."
+        +"\n- Do NOT start with 'Great week' or similar filler. Open with something specific."
+        +"\nReturn ONLY the summary text. No labels, no JSON, no preamble.";
+      var summaryText=await callClaudeWithRetry(summaryPrompt);
+      summaryText=(summaryText||"").replace(/```/g,"").trim();
+      summaryHTML="<div style='font-size:13px;color:#374151;line-height:1.85;margin-bottom:36px;padding:20px 24px;background:#f9fafb;border-radius:10px;border-left:3px solid #d1d5db;'>"+summaryText.replace(/\n/g,"<br/>")+"</div>";
+    } catch(e) {
+      // Fallback if Claude call fails
+      summaryHTML="<div style='font-size:13px;color:#374151;line-height:1.85;margin-bottom:36px;padding:20px 24px;background:#f9fafb;border-radius:10px;border-left:3px solid #d1d5db;'>"+firstName+" completed "+agentTickets.length+" tickets this period with an average score of "+avg+"%. "+passed+" of "+agentTickets.length+" tickets passed the 85% threshold.</div>";
+    }
+
+    // Ticket cards — with disputed score handling and winning notes
     var ticketCards=agentTickets.map(function(t){
-      var ts=sc(t.finalScore);
-      var rl=t.autofail?"Autofail":t.passed?"Pass":"Fail";
-      var rb=t.autofail||!t.passed?"#fee2e2":"#f0fdf4",rt=t.autofail||!t.passed?"#991b1b":"#166534",rbd=t.autofail||!t.passed?"#fecaca":"#bbf7d0";
-      var chips=matrix.filter(function(c){var v=(t.scores&&t.scores[c.id])||"";return v&&v!=="NA";}).map(function(c){var lbl=catLbl((t.scores&&t.scores[c.id])||"");if(!lbl)return "";return "<div style='display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #f3f4f6;'><span style='font-size:12px;color:#374151;'>"+c.label+"</span><span style='font-size:11px;font-weight:700;padding:2px 10px;border-radius:4px;"+badge(lbl)+"'>"+lbl+"</span></div>";}).join("");
+      var hasDisputes=t.hasDisputes||(t.disputes&&Object.keys(t.disputes).length>0);
+      var dispSc=calcDisputedScore(t,matrix);
+      var finalPct=dispSc?dispSc.pct:t.finalScore;
+      var aiPct=t.aiScore||t.finalScore;
+      var ts=sc(finalPct);
+      var rl=t.autofail?"Autofail":(dispSc?(!t.autofail&&dispSc.pct>=85):t.passed)?"Pass":"Fail";
+      var rb=t.autofail||rl==="Fail"?"#fee2e2":"#f0fdf4",rt=t.autofail||rl==="Fail"?"#991b1b":"#166534",rbd=t.autofail||rl==="Fail"?"#fecaca":"#bbf7d0";
+
+      // Score display: if disputed, show AI crossed out -> Final
+      var scoreHTML;
+      if(hasDisputes&&aiPct!==finalPct){
+        scoreHTML="<div style='text-align:right;'>"
+          +"<div style='font-size:13px;color:#9ca3af;text-decoration:line-through;line-height:1;margin-bottom:2px;'>"+aiPct+"%</div>"
+          +"<div style='font-size:26px;font-weight:700;color:"+ts.t+";line-height:1;'>"+finalPct+"%</div>"
+          +"<div style='font-size:10px;color:#92400e;margin-top:3px;font-weight:600;'>Disputed</div>"
+          +"</div>";
+      } else {
+        scoreHTML="<div style='font-size:26px;font-weight:700;color:"+ts.t+";line-height:1;'>"+finalPct+"%</div>"
+          +"<div style='font-size:10px;color:#9ca3af;margin-top:2px;'>Reviewed by "+t.reviewer+"</div>";
+      }
+
+      // Per-category chips — winning notes (disputed note if disputed, AI note if not)
+      var chips=matrix.filter(function(c){
+        var v=(t.scores&&t.scores[c.id])||"";
+        return v&&v!=="NA";
+      }).map(function(c){
+        var dispute=t.disputes&&t.disputes[c.id];
+        var finalScore=dispute?dispute.finalScore:((t.scores&&t.scores[c.id])||"");
+        var lbl=catLbl(finalScore);
+        if(!lbl)return "";
+        // Winning notes: dispute justification takes priority
+        var noteText="";
+        if(dispute&&dispute.justification){
+          noteText=dispute.justification;
+        } else if(t.justifications&&t.justifications[c.id]){
+          var j=t.justifications[c.id];
+          noteText=(j.reason||"");
+          if(j.improve&&j.improve!=="null") noteText+=" "+j.improve;
+        }
+        var noteHTML=noteText?"<div style='font-size:11px;color:#6b7280;line-height:1.5;margin-top:3px;padding-left:4px;'>"+noteText+"</div>":"";
+        return "<div style='padding:8px 0;border-bottom:1px solid #f3f4f6;'>"
+          +"<div style='display:flex;justify-content:space-between;align-items:center;'>"
+          +"<span style='font-size:12px;color:#374151;font-weight:500;'>"+c.label+(dispute?" <span style=\'font-size:10px;color:#92400e;font-weight:600;\'>D</span>":"")+"</span>"
+          +"<span style='font-size:11px;font-weight:700;padding:2px 10px;border-radius:4px;"+badge(lbl)+"'>"+lbl+"</span>"
+          +"</div>"+noteHTML+"</div>";
+      }).join("");
+
+      // AI comments (+ / - lines)
       var commentLines=(t.comments||"").split("\n").filter(function(l){return l.trim();});
       var commHTML="";
-      if(commentLines.length){commHTML="<div style='margin-top:12px;padding-top:12px;border-top:1px solid #f3f4f6;'><div style='font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.07em;color:#6b7280;margin-bottom:8px;'>Auditor notes</div>";commentLines.forEach(function(line){var isPos=line.trim().charAt(0)==="+";var isNeg=line.trim().charAt(0)==="-";var col=isPos?"#166534":isNeg?"#991b1b":"#374151";var brd=isPos?"#bbf7d0":isNeg?"#fecaca":"#e5e7eb";var clean=isPos||isNeg?line.trim().slice(1).trim():line;commHTML+="<div style='font-size:12px;color:"+col+";line-height:1.6;margin-bottom:5px;padding-left:10px;border-left:2px solid "+brd+";'>"+clean+"</div>";});commHTML+="</div>";}
+      if(commentLines.length){
+        commHTML="<div style='margin-top:14px;padding-top:12px;border-top:1px solid #f3f4f6;'>"
+          +"<div style='font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.07em;color:#6b7280;margin-bottom:8px;'>Audit notes</div>";
+        commentLines.forEach(function(line){
+          var isPos=line.trim().charAt(0)==="+";var isNeg=line.trim().charAt(0)==="-";
+          var col=isPos?"#166534":isNeg?"#991b1b":"#374151";
+          var brd=isPos?"#bbf7d0":isNeg?"#fecaca":"#e5e7eb";
+          var clean=isPos||isNeg?line.trim().slice(1).trim():line;
+          commHTML+="<div style='font-size:12px;color:"+col+";line-height:1.6;margin-bottom:5px;padding-left:10px;border-left:2px solid "+brd+";'>"+clean+"</div>";
+        });
+        commHTML+="</div>";
+      }
+
+      // Reviewer notes — separately labeled
+      var reviewerNotesHTML="";
+      if(t.reviewerNotes&&t.reviewerNotes.trim()){
+        reviewerNotesHTML="<div style='margin-top:12px;padding:10px 14px;background:#f9fafb;border-radius:6px;border:1px solid #e5e7eb;'>"
+          +"<div style='font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.07em;color:#6b7280;margin-bottom:5px;'>Reviewer notes</div>"
+          +"<div style='font-size:12px;color:#374151;line-height:1.6;'>"+t.reviewerNotes.trim()+"</div>"
+          +"</div>";
+      }
+
       var viewLink=t.ticketUrl?"<a href='"+t.ticketUrl+"' style='font-size:12px;color:#2563eb;text-decoration:none;display:inline-block;margin-top:10px;'>View ticket</a>":"";
-      return "<div style='page-break-inside:avoid;margin-bottom:20px;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden;'><div style='background:#f9fafb;padding:14px 20px;border-bottom:1px solid #e5e7eb;display:flex;justify-content:space-between;align-items:center;'><div><div style='font-size:13px;font-weight:700;color:#111827;margin-bottom:2px;'>#"+t.ticketId+"</div><div style='font-size:11px;color:#6b7280;'>"+t.contactReason+"</div></div><div style='text-align:right;display:flex;align-items:center;gap:14px;'><div><div style='font-size:26px;font-weight:700;color:"+ts.t+";line-height:1;'>"+t.finalScore+"%</div><div style='font-size:10px;color:#9ca3af;margin-top:2px;'>Reviewed by "+t.reviewer+"</div></div><div style='padding:4px 12px;border-radius:20px;background:"+rb+";color:"+rt+";border:1px solid "+rbd+";font-size:11px;font-weight:700;'>"+rl+"</div></div></div><div style='padding:14px 20px;'>"+chips+commHTML+viewLink+"</div></div>";
+
+      return "<div style='page-break-inside:avoid;margin-bottom:20px;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden;'>"
+        +"<div style='background:#f9fafb;padding:14px 20px;border-bottom:1px solid #e5e7eb;display:flex;justify-content:space-between;align-items:center;'>"
+          +"<div><div style='font-size:13px;font-weight:700;color:#111827;margin-bottom:2px;'>#"+t.ticketId+"</div>"
+          +"<div style='font-size:11px;color:#6b7280;'>"+t.contactReason+"</div>"
+          +"<div style='font-size:10px;color:#9ca3af;margin-top:2px;'>Reviewed by "+t.reviewer+"</div></div>"
+          +"<div style='display:flex;align-items:center;gap:14px;'>"
+            +scoreHTML
+            +"<div style='padding:4px 12px;border-radius:20px;background:"+rb+";color:"+rt+";border:1px solid "+rbd+";font-size:11px;font-weight:700;'>"+rl+"</div>"
+          +"</div>"
+        +"</div>"
+        +"<div style='padding:14px 20px;'>"+chips+commHTML+reviewerNotesHTML+viewLink+"</div>"
+        +"</div>";
     }).join("");
 
     return "<!DOCTYPE html><html><head><meta charset='utf-8'><style>*{box-sizing:border-box;margin:0;padding:0;}body{font-family:Arial,sans-serif;background:white;color:#111827;-webkit-print-color-adjust:exact;print-color-adjust:exact;}.page{max-width:700px;margin:0 auto;padding:48px 40px 60px;}@media print{.page{padding:32px;}}</style></head><body><div class='page'>"
@@ -1143,11 +1278,11 @@ function App() {
         +"<div style='font-size:72px;font-weight:700;color:"+tone.t+";line-height:1;margin-bottom:6px;'>"+avg+"%</div>"
         +"<div style='font-size:11px;text-transform:uppercase;letter-spacing:0.1em;color:#9ca3af;margin-bottom:40px;'>Average QA Score</div>"
         +"<div style='display:inline-flex;border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;'>"
-          +[["Tickets reviewed",agentTickets.length],["Highest score",highest+"%"],["Lowest score",lowest+"%"]].map(function(p,i){return "<div style='padding:14px 28px;"+(i>0?"border-left:1px solid #e5e7eb;":"")+"'><div style='font-size:22px;font-weight:700;color:#111827;'>"+p[1]+"</div><div style='font-size:10px;text-transform:uppercase;letter-spacing:0.07em;color:#9ca3af;margin-top:3px;'>"+p[0]+"</div></div>";}).join("")
+          +[["Tickets reviewed",agentTickets.length],["Passed",passed],["Failed",failed+(autofails>0?" (+"+autofails+" autofail"+(autofails!==1?"s":"")+")")],["Highest",highest+"%"],["Lowest",lowest+"%"]].map(function(p,i){return "<div style='padding:14px 24px;"+(i>0?"border-left:1px solid #e5e7eb;":"")+"'><div style='font-size:20px;font-weight:700;color:#111827;'>"+p[1]+"</div><div style='font-size:10px;text-transform:uppercase;letter-spacing:0.07em;color:#9ca3af;margin-top:3px;'>"+p[0]+"</div></div>";}).join("")
         +"</div>"
       +"</div>"
       +"<div style='margin-bottom:40px;'><h2 style='font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:#6b7280;margin-bottom:16px;'>Category performance</h2><div style='border:0.5px solid #e5e7eb;border-radius:10px;padding:20px;'>"+catSummary+"</div></div>"
-      +"<div style='font-size:13px;color:#374151;line-height:1.75;margin-bottom:36px;border-left:3px solid #e5e7eb;padding-left:14px;'>Great week, "+firstName+". "+passed+" out of "+agentTickets.length+" tickets scored at or above 85%. Your average of "+avg+"% reflects "+(avg>=90?"excellent":"solid")+" work. Keep building on your strengths.</div>"
+      +summaryHTML
       +"<h2 style='font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:#6b7280;margin-bottom:16px;'>Ticket log &mdash; "+agentTickets.length+" ticket"+(agentTickets.length!==1?"s":"")+" reviewed</h2>"
       +ticketCards
       +"<hr style='border:none;border-top:1px solid #e5e7eb;margin:36px 0;'/>"
@@ -1155,14 +1290,18 @@ function App() {
       +"</div></body></html>";
   }
 
-  function generateAgentReport(agentName) {
+  async function generateAgentReport(agentName) {
     var fromVal=rptFrom.trim(),toVal=rptTo.trim();
-    var html=buildAgentReportHTML(agentName,fromVal,toVal);
-    if(!html){addToast("No tickets found for "+agentName+" in that date range","error");return;}
-    var safeName=agentName.replace(/[^a-zA-Z0-9]/g,"_");
-    var filename="QA_"+safeName+".doc";
-    downloadBlob(html,filename,"application/msword");
-    addToast("Downloaded: "+filename);
+    addToast("Generating report for "+agentName+"...");
+    try {
+      var html=await buildAgentReportHTML(agentName,fromVal,toVal,function(msg){setSyncStatus(msg);});
+      if(!html){addToast("No tickets found for "+agentName+" in that date range","error");return;}
+      var safeName=agentName.replace(/[^a-zA-Z0-9]/g,"_");
+      var filename="QA_"+safeName+".doc";
+      downloadBlob(html,filename,"application/msword");
+      addToast("Downloaded: "+filename);
+    } catch(e){addToast("Report failed: "+e.message,"error");}
+    setSyncStatus("");
   }
 
   async function loadJSZip() {
@@ -1292,18 +1431,21 @@ function App() {
     var fromVal=rptFrom.trim(),toVal=rptTo.trim();
     var allAgents=[...new Set(tickets.map(function(t){return t.agentName;}).filter(Boolean))].sort();
     if(!allAgents.length){addToast("No tickets found","error");return;}
-    addToast("Building agent reports...");
+    addToast("Building agent reports — generating AI summaries...");
     try {
       await loadJSZip();
       var zip=new window.JSZip();
       var added=0;
-      allAgents.forEach(function(agentName){
-        var html=buildAgentReportHTML(agentName,fromVal,toVal);
-        if(!html)return;
+      for(var i=0;i<allAgents.length;i++){
+        var agentName=allAgents[i];
+        setSyncStatus("Generating report "+(i+1)+" of "+allAgents.length+": "+agentName+"...");
+        var html=await buildAgentReportHTML(agentName,fromVal,toVal,function(msg){setSyncStatus(msg);});
+        if(!html)continue;
         zip.file("QA_"+agentName.replace(/[^a-zA-Z0-9]/g,"_")+".doc",html);
         added++;
-      });
-      if(!added){addToast("No tickets matched","error");return;}
+      }
+      if(!added){addToast("No tickets matched","error");setSyncStatus("");return;}
+      setSyncStatus("Packaging zip...");
       var blob=await zip.generateAsync({type:"blob"});
       var dateTag=fromVal&&toVal?"_"+fromVal+"_to_"+toVal:"";
       var url=URL.createObjectURL(blob);
@@ -1312,6 +1454,7 @@ function App() {
       setTimeout(function(){URL.revokeObjectURL(url);},2000);
       addToast("Downloaded "+added+" agent reports");
     } catch(e){addToast("Failed: "+e.message,"error");}
+    setSyncStatus("");
   }
 
   async function generateTeamInsightZip() {
@@ -1337,17 +1480,19 @@ function App() {
     var fromVal=rptFrom.trim(),toVal=rptTo.trim();
     var allAgents=[...new Set(tickets.map(function(t){return t.agentName;}).filter(Boolean))].sort();
     if(!allAgents.length){addToast("No tickets found","error");return;}
-    addToast("Building all reports...");
+    addToast("Building all reports — generating AI summaries...");
     try {
       await loadJSZip();
       var zip=new window.JSZip();
       var added=0;
-      allAgents.forEach(function(agentName){
-        var html=buildAgentReportHTML(agentName,fromVal,toVal);
-        if(!html)return;
+      for(var i=0;i<allAgents.length;i++){
+        var agentName=allAgents[i];
+        setSyncStatus("Generating report "+(i+1)+" of "+allAgents.length+": "+agentName+"...");
+        var html=await buildAgentReportHTML(agentName,fromVal,toVal,function(msg){setSyncStatus(msg);});
+        if(!html)continue;
         zip.file("Agent Reports/QA_"+agentName.replace(/[^a-zA-Z0-9]/g,"_")+".doc",html);
         added++;
-      });
+      }
       var teamHtml=buildTeamInsightHTML(fromVal,toVal);
       if(teamHtml){
         var dateTag=fromVal&&toVal?"_"+fromVal+"_to_"+toVal:"";
@@ -1362,6 +1507,7 @@ function App() {
       setTimeout(function(){URL.revokeObjectURL(url);},2000);
       addToast("Downloaded "+added+" agent reports + team insight");
     } catch(e){addToast("Failed: "+e.message,"error");}
+    setSyncStatus("");
   }
 
 
