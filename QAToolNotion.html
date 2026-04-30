@@ -2,8 +2,12 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  1.5.3
+  Version:  1.5.4
   Date:     2026-05-01
+
+  Changelog:
+  v1.5.4 (2026-05-01)
+    - Force redeploy: v1.5.3 fix confirmed in source but Railway served stale build
 
   Changelog:
   v1.5.3 (2026-05-01)
@@ -1282,7 +1286,16 @@ function App() {
         +"<div style='font-size:72px;font-weight:700;color:"+tone.t+";line-height:1;margin-bottom:6px;'>"+avg+"%</div>"
         +"<div style='font-size:11px;text-transform:uppercase;letter-spacing:0.1em;color:#9ca3af;margin-bottom:40px;'>Average QA Score</div>"
         +"<div style='display:inline-flex;border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;'>"
-          +[["Tickets reviewed",agentTickets.length],["Passed",passed],["Failed",failed+(autofails>0?" (+"+autofails+" autofail"+(autofails!==1?"s":"")+")")],["Highest",highest+"%"],["Lowest",lowest+"%"]].map(function(p,i){return "<div style='padding:14px 24px;"+(i>0?"border-left:1px solid #e5e7eb;":"")+"'><div style='font-size:20px;font-weight:700;color:#111827;'>"+p[1]+"</div><div style='font-size:10px;text-transform:uppercase;letter-spacing:0.07em;color:#9ca3af;margin-top:3px;'>"+p[0]+"</div></div>";}).join("")
+          +(function(){
+            var failedLabel = String(failed)+(autofails>0?" (+"+autofails+"AF)":"");
+            var statCells=[["Tickets",agentTickets.length],["Passed",passed],["Failed",failedLabel],["Highest",highest+"%"],["Lowest",lowest+"%"]];
+            return statCells.map(function(p,i){
+              var border=i>0?"border-left:1px solid #e5e7eb;":"";
+              return "<div style=\'padding:14px 24px;"+border+"\'><div style=\'font-size:20px;font-weight:700;color:#111827;\'>"
+                +p[1]+"</div><div style=\'font-size:10px;text-transform:uppercase;letter-spacing:0.07em;color:#9ca3af;margin-top:3px;\'>"
+                +p[0]+"</div></div>";
+            }).join("");
+          })()
         +"</div>"
       +"</div>"
       +"<div style='margin-bottom:40px;'><h2 style='font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:#6b7280;margin-bottom:16px;'>Category performance</h2><div style='border:0.5px solid #e5e7eb;border-radius:10px;padding:20px;'>"+catSummary+"</div></div>"
