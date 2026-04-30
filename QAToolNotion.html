@@ -2,8 +2,21 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  1.4.4
-  Date:     2026-04-30
+  Version:  1.4.6
+  Date:     2026-05-01
+
+  Changelog:
+  v1.4.6 (2026-05-01)
+    - Fix: Scores JSON with single quotes (Python-style) now parses correctly — per-category
+      score pills were blank on all tickets saved with single-quoted JSON
+    - Fix: Same single-quote resilience applied to Justifications JSON parsing
+      (autofails and disputes already had this fix; now consistent across all 4 fields)
+
+  Changelog:
+  v1.4.5 (2026-05-01)
+    - Fix: Review detail shows warning banner when per-category Scores JSON is missing/empty
+      (tickets where aiScores={} but finalScore was saved — common in older tickets)
+    - Fix: Reviewer Notes now saved to Notion on initial ticket save (was missing from saveTicketToNotion)
 
   Changelog:
   v1.4.4 (2026-04-30)
@@ -322,6 +335,7 @@ async function saveTicketToNotion(dbId, ticket) {
     "Returns Notes":   { rich_text: rt(formatNotes(ticket.justifications,"returns")) },
     "Promo Notes":     { rich_text: rt(formatNotes(ticket.justifications,"promo")) },
     "Retention Notes": { rich_text: rt(formatNotes(ticket.justifications,"retention")) },
+    "Reviewer Notes":     { rich_text: rt((ticket.reviewerNotes||"").slice(0,1990)) },
     "Comments":           { rich_text: rt((ticket.comments||"").slice(0,1900)) },
     "Transcript":         { rich_text: rt((ticket.transcript||"").slice(0,1900)) },
     "Autofails JSON":     { rich_text: rt(JSON.stringify(ticket.autofails||[]).slice(0,1900)) },
@@ -370,10 +384,10 @@ function tryParseJSON(txt) {
 
 function parseNotionRow(r) {
   let aiScores = {}, disputes = {}, justifications = {}, autofails = [];
-  try { aiScores = JSON.parse(r.scoresJSON || r["Scores JSON"] || "{}"); } catch(e) {}
+  try { aiScores = JSON.parse((r.scoresJSON || r["Scores JSON"] || "{}").replace(/'/g,'"')); } catch(e) {}
   try { disputes = JSON.parse((r.disputesJSON||r["Disputes JSON"]||"").replace(/'/g,'"')); } catch(e) {}
   try {
-    var rawJust = JSON.parse(r.justificationsJSON || r["Justifications JSON"] || "{}");
+    var rawJust = JSON.parse((r.justificationsJSON || r["Justifications JSON"] || "{}").replace(/'/g,'"'));
     // Handle both compressed format {r,i} and full format {reason,improve}
     Object.entries(rawJust).forEach(function(e){
       var k=e[0],v=e[1];
@@ -2055,6 +2069,11 @@ Rules:
                   <p style={{margin:0,fontWeight:500,fontSize:"14px"}}>{isEditor?"Scores — click any category to dispute":"Scores"}</p>
                   {isEditor&&<span style={{fontSize:"12px",color:"var(--color-text-secondary)"}}>Disputing as <strong>{currentUser.name}</strong></span>}
                 </div>
+                {(!reviewSelected.aiScores||Object.keys(reviewSelected.aiScores).length===0)&&(
+                  <div style={{padding:"10px 14px",background:"var(--color-background-warning)",border:"0.5px solid var(--color-border-warning)",borderRadius:"var(--border-radius-md)",marginBottom:"12px",fontSize:"12px",color:"var(--color-text-warning)"}}>
+                    ⚠ Per-category score data is not available for this ticket (Scores JSON was not saved or is empty). The overall score of {reviewSelected.finalScore}% was recorded correctly. You can still dispute categories below by selecting a new score.
+                  </div>
+                )}
                 {matrix.map(function(c){
                   var aiScore=(reviewSelected.aiScores&&reviewSelected.aiScores[c.id])||"";
                   var existingDispute=reviewSelected.disputes&&reviewSelected.disputes[c.id];
