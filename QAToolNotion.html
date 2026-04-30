@@ -1590,9 +1590,7 @@ Rules:
   }
 
   function removeUser(email) {
-    if (!window.confirm("Remove "+email+"?
-
-Their tickets will remain in the database but orphaned.")) return;
+    if (!window.confirm("Remove "+email+"? Their tickets will remain in the database but orphaned.")) return;
     setUserList(function(ul){return ul.filter(function(u){return u.email!==email;});});
     setUserListDirty(true);
   }
