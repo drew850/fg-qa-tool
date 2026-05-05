@@ -2,8 +2,13 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  1.5.6
+  Version:  1.5.7
   Date:     2026-05-06
+
+  Changelog:
+  v1.5.7 (2026-05-06)
+    - Paid tier: reduced inter-ticket delay from 13s to 2s
+    - Paid tier: reduced retry backoff from 15s base to 3s base (3s/6s/12s/24s)
 
   Changelog:
   v1.5.6 (2026-05-06)
@@ -254,7 +259,7 @@ async function callClaudeWithRetry(prompt, maxRetries=4) {
     } catch(e) {
       var is429 = e.message && e.message.includes("429");
       if (is429 && attempt < maxRetries) {
-        var wait = Math.pow(2, attempt) * 15000; // 15s, 30s, 60s, 120s
+        var wait = Math.pow(2, attempt) * 3000; // 3s, 6s, 12s, 24s
         console.log("[QA] Rate limited, waiting " + (wait/1000) + "s...");
         await new Promise(function(r){setTimeout(r, wait);});
       } else {
@@ -1061,13 +1066,10 @@ function App() {
         results=[...results,{ticketId:ticket.ticketId,agentName:ticket.agentName,error:err.message,finalScore:0,passed:false,autofail:false,week}];
       }
       setBatchResults([...results]);
-      // Free tier: 5 req/min. Wait 13s between tickets, show countdown.
+      // Paid tier: short delay between tickets to avoid bursts
       if(i < batchTickets.length-1 && !batchStopRef.current) {
-        for(var s=13; s>0; s--) {
-          if(batchStopRef.current) break;
-          setBatchStatus("Waiting "+s+"s before next ticket (free tier rate limit)...");
-          await new Promise(function(r){setTimeout(r,1000);});
-        }
+        setBatchStatus("Processing next ticket...");
+        await new Promise(function(r){setTimeout(r,2000);});
       }
     }
     setBatchRunning(false);
