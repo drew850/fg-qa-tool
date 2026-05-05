@@ -2,8 +2,14 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  1.5.5
-  Date:     2026-05-01
+  Version:  1.5.6
+  Date:     2026-05-06
+
+  Changelog:
+  v1.5.6 (2026-05-06)
+    - Migration: Notion workspace moved from personal to Freebird main workspace
+    - Updated TICKETS_DB_ID to new Freebird QA Tickets DB
+    - Updated CONFIG_DB_ID to new Freebird QA Config DB
 
   Changelog:
   v1.5.5 (2026-05-01)
@@ -167,8 +173,8 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const TICKETS_DB_ID = "39722bec0f2e46daa738df31b09781d3";
-const CONFIG_DB_ID = "922db26dc5f54849833b341568f4619d";
+const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
+const CONFIG_DB_ID = "3574e96c994180c08a40f31e89db80ce";
 const HARDCODED_SETUP = { ticketsDbId: TICKETS_DB_ID, configDbId: CONFIG_DB_ID };
 const ANTHROPIC_KEY = (window.__ENV__&&window.__ENV__.ANTHROPIC_KEY)||window.ANTHROPIC_KEY||"";
 const PASS_THRESHOLD = 85;
