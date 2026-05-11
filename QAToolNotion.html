@@ -2,8 +2,17 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  1.5.7
+  Version:  1.6.0
   Date:     2026-05-06
+
+  Changelog:
+  v1.6.0 (2026-05-06)
+    - Fix #1: AI comments no longer show +strength/-improvement header labels; + and - used as direct bullet prefixes
+    - Fix #7: Reviewer Notes textarea scrolls with page; only Submit/Review buttons remain sticky at bottom
+    - Fix #8: Edit users can now delete audits with mandatory justification prompt
+    - Fix #8: Deleted audits soft-deleted in Notion (Deleted checkbox + Deleted By/At/Reason fields)
+    - Fix #8: Deleted tickets filtered from all views on load
+    - Fix #8: Notion DB now reads Deleted, Deleted By, Deleted At, Delete Reason fields
 
   Changelog:
   v1.5.7 (2026-05-06)
@@ -311,6 +320,8 @@ async function loadTicketsFromNotion(dbId, onStatus) {
     retentionNotes:getProp(page,"Retention Notes")||"",
     comments: getProp(page,"Comments")||"", transcript: getProp(page,"Transcript")||"",
     autofailsJSON: getProp(page,"Autofails JSON")||"[]", savedAt: getProp(page,"Saved At")||"",
+    deleted: page.properties&&page.properties["Deleted"]&&page.properties["Deleted"].checkbox||false,
+    deletedBy: getProp(page,"Deleted By")||"", deletedAt: getProp(page,"Deleted At")||"", deleteReason: getProp(page,"Delete Reason")||"",
   }));
 }
 
@@ -894,11 +905,24 @@ function App() {
   }
 
   async function deleteAudit(ticket) {
-    if(!window.confirm("Delete audit for ticket #"+ticket.ticketId+"?\n\nThis will permanently remove it from Notion and cannot be undone.")) return;
+    var justification = "";
+    if(isFullAccess) {
+      if(!window.confirm("Delete audit for ticket #"+ticket.ticketId+"? This will archive it and remove it from all views.")) return;
+    } else {
+      // Edit users must provide justification
+      justification = window.prompt("Please provide a reason for deleting this audit (ticket #"+ticket.ticketId+"):");
+      if(justification===null) return; // cancelled
+      if(!justification.trim()) { addToast("A justification is required to delete an audit","error"); return; }
+    }
     try {
       if(ticket.notionPageId) {
-        // Notion uses archive (PATCH in_trash:true) to delete pages
-        await notionAPI("/v1/pages/"+ticket.notionPageId, "PATCH", {in_trash: true});
+        var now=new Date().toISOString();
+        await notionAPI("/v1/pages/"+ticket.notionPageId, "PATCH", {properties:{
+          "Deleted":      {checkbox: true},
+          "Deleted By":   {rich_text:[{text:{content:currentUser.name}}]},
+          "Deleted At":   {rich_text:[{text:{content:now}}]},
+          "Delete Reason":{rich_text:[{text:{content:justification.trim()||"Deleted by "+currentUser.role+" user"}}]}
+        }});
       }
       setTickets(function(ts){return ts.filter(function(t){return t.notionPageId!==ticket.notionPageId;});});
       setReviewSelected(null);
@@ -988,7 +1012,7 @@ function App() {
       +'"scores":{'+scoresSchema+'},'
       +'"justifications":{'+justSchema+'},'
       +'"autofails":[],'
-      +'"comments":"+strength\\n-improvement"}';
+      +'"comments":"+ [key strength observation]\\n- [key improvement observation]"}';
   }
 
   async function runBatchQA() {
@@ -1824,7 +1848,9 @@ Rules:
     setSyncStatus("Loading tickets from Notion...");
     try {
       const t = await loadTicketsFromNotion(setup.ticketsDbId, setSyncStatus);
-      setTickets(Array.isArray(t) ? t : []);
+      // Filter out soft-deleted tickets from all views
+      var activeTickets = Array.isArray(t) ? t.filter(function(tk){return !tk.deleted;}) : [];
+      setTickets(activeTickets);
       setSyncStatus("Loading users...");
       await loadUsersFromNotion(setup.configDbId);
       setSyncStatus("");
@@ -2336,7 +2362,7 @@ Rules:
                 <button onClick={function(){setReviewSelected(null);setDisputeState({});}} style={{...ghost,fontSize:"12px"}}>← Back to list</button>
                 <div style={{display:"flex",gap:"8px",alignItems:"center"}}>
                   {reviewSelected.ticketUrl&&<a href={reviewSelected.ticketUrl} target="_blank" style={{fontSize:"12px",color:"var(--color-text-info)"}}>Open in Gorgias ↗</a>}
-                  {isFullAccess&&<button onClick={function(){deleteAudit(reviewSelected);}} style={{...ghost,fontSize:"12px",color:"var(--color-text-danger)",borderColor:"var(--color-border-danger)"}}>🗑 Delete audit</button>}
+                  {isEditor&&<button onClick={function(){deleteAudit(reviewSelected);}} style={{...ghost,fontSize:"12px",color:"var(--color-text-danger)",borderColor:"var(--color-border-danger)"}}>🗑 Delete audit</button>}
                 </div>
               </div>
 
@@ -2470,10 +2496,20 @@ Rules:
               {reviewSelected.comments&&(
                 <div style={{...card,marginBottom:"12px"}}>
                   <p style={{...sectionLabel,marginBottom:"8px"}}>AI comments</p>
-                  {reviewSelected.comments.split("\n").filter(function(l){return l.trim();}).map(function(line,i){
-                    var isPos=line.trim().charAt(0)==="+";var isNeg=line.trim().charAt(0)==="-";
-                    var col=isPos?T.green.text:isNeg?T.red.text:"var(--color-text-secondary)";
-                    return <p key={i} style={{margin:"0 0 6px",fontSize:"13px",color:col,lineHeight:"1.6"}}>{line}</p>;
+                  {reviewSelected.comments.split("\n").filter(function(l){
+                    var s=l.trim();
+                    if(!s) return false;
+                    // Skip bare header labels
+                    var lower=s.replace(/^[+-]\s*/,"").toLowerCase();
+                    if((lower==="strength"||lower==="strengths"||lower==="improvement"||lower==="improvements")&&s.length<20) return false;
+                    return true;
+                  }).map(function(line,i){
+                    var s=line.trim();
+                    var isPos=s.charAt(0)==="+";var isNeg=s.charAt(0)==="-";
+                    var col=isPos?T.green.text:isNeg?T.amber.text:"var(--color-text-secondary)";
+                    // Strip the +/- prefix for display
+                    var text=isPos||isNeg?s.slice(1).replace(/^\s*(strength|improvement)[:\s]*/i,"").trim():s;
+                    return <p key={i} style={{margin:"0 0 6px",fontSize:"13px",color:col,lineHeight:"1.6"}}>{(isPos?"+ ":isNeg?"- ":"")+text}</p>;
                   })}
                 </div>
               )}
@@ -2491,31 +2527,39 @@ Rules:
                 </div>
               )}
 
-              {/* Save dispute button */}
+              {/* Reviewer Notes — scrolls with page, NOT sticky */}
+              {(function(){
+                var isAssigned=currentUser.name===reviewSelected.reviewer;
+                return(
+                  <React.Fragment>
+                    {isEditor&&isAssigned&&(
+                      <div style={{...card,marginBottom:"12px"}}>
+                        <div style={{fontSize:"11px",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.07em",color:"var(--color-text-secondary)",marginBottom:"6px"}}>Reviewer Notes</div>
+                        <textarea
+                          placeholder="Add your notes about this ticket..."
+                          defaultValue={reviewSelected.reviewerNotes||""}
+                          onChange={function(e){setDisputeState(function(d){return Object.assign({},d,{_reviewerNotes:e.target.value});});}}
+                          style={{width:"100%",boxSizing:"border-box",height:"80px",resize:"vertical",fontFamily:"inherit",fontSize:"13px",lineHeight:"1.6",padding:"8px 10px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}
+                        />
+                      </div>
+                    )}
+                    {isEditor&&!isAssigned&&reviewSelected.reviewerNotes&&(
+                      <div style={{...card,marginBottom:"12px"}}>
+                        <div style={{fontSize:"11px",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.07em",color:"var(--color-text-secondary)",marginBottom:"4px"}}>Reviewer Notes</div>
+                        <div style={{fontSize:"13px",color:"var(--color-text-primary)",lineHeight:1.6}}>{reviewSelected.reviewerNotes}</div>
+                      </div>
+                    )}
+                  </React.Fragment>
+                );
+              })()}
+
+              {/* Save dispute button — STICKY */}
               {(function(){
                 var pendingCount=Object.values(disputeState).filter(function(d){return (d.newScore&&d.justification&&d.justification.trim())||d.removed;}).length;
                 var isReviewed=reviewedTickets[reviewSelected.id||reviewSelected.ticketId]||reviewSelected.reviewed;
                 var isAssigned=currentUser.name===reviewSelected.reviewer;
                 return(
                   <div style={{position:"sticky",bottom:"16px",zIndex:100,display:"flex",flexDirection:"column",gap:"8px"}}>
-                    {/* Reviewer Notes */}
-                    {isEditor&&isAssigned&&(
-                      <div>
-                        <div style={{fontSize:"11px",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.07em",color:"var(--color-text-secondary)",marginBottom:"6px"}}>Reviewer Notes</div>
-                        <textarea
-                          placeholder="Add your notes about this ticket..."
-                          defaultValue={reviewSelected.reviewerNotes||""}
-                          onChange={function(e){setDisputeState(function(d){return Object.assign({},d,{_reviewerNotes:e.target.value});});}}
-                          style={{width:"100%",boxSizing:"border-box",height:"80px",resize:"vertical",fontFamily:"inherit",fontSize:"13px",lineHeight:"1.6",padding:"8px 10px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",marginBottom:"4px"}}
-                        />
-                      </div>
-                    )}
-                    {isEditor&&!isAssigned&&reviewSelected.reviewerNotes&&(
-                      <div style={{padding:"10px 14px",background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)"}}>
-                        <div style={{fontSize:"11px",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.07em",color:"var(--color-text-secondary)",marginBottom:"4px"}}>Reviewer Notes</div>
-                        <div style={{fontSize:"13px",color:"var(--color-text-primary)",lineHeight:1.6}}>{reviewSelected.reviewerNotes}</div>
-                      </div>
-                    )}
                     {pendingCount>0&&(
                       <button onClick={saveDispute} disabled={savingDispute||!isEditor} style={{...btnSuccess,width:"100%",padding:"12px",fontSize:"14px",opacity:savingDispute||!isEditor?0.5:1}}>
                         {savingDispute?"Saving...":"Save "+pendingCount+" dispute"+(pendingCount!==1?"s":"")+" as "+currentUser.name}
