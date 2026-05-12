@@ -2,8 +2,24 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  1.6.0
-  Date:     2026-05-06
+  Version:  1.7.0
+  Date:     2026-05-12
+
+  Changelog:
+  v1.7.0 (2026-05-12)
+    - Feedback #2: Agent field editable via dropdown in Review ticket detail (Edit+ users)
+    - Feedback #3: Manual Audit tab — paste transcript, AI scores and saves to Notion with Audit Type: Manual
+    - Feedback #4: Calibration tab (Full access only) — AI analyzes disputed tickets for rubric/prompt recommendations
+    - Feedback #10: Per-category AI notes editable inline with version history (Notes History JSON)
+    - Feedback #10: AI Comments section editable with version history tracking
+    - Feedback #10: Edited badge shown on modified notes; original AI content always preserved
+    - Feedback #10: Reopen reviewed tickets (Edit+ users) with mandatory reason, multiple reopens supported via Reopen History JSON
+    - Notion: reads/writes Notes History JSON, Reopen History JSON, Audit Type fields
+    - Nav: Manual Audit visible to Edit+ only, Calibration visible to Full access only
+
+  Changelog:
+  v1.6.1 (2026-05-06)
+    - Feedback #9: Version number displayed in header (replaces need to check /version endpoint)
 
   Changelog:
   v1.6.0 (2026-05-06)
@@ -187,6 +203,8 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
+const APP_VERSION = "v1.7.0";
+const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
 const CONFIG_DB_ID = "3574e96c994180c08a40f31e89db80ce";
 const HARDCODED_SETUP = { ticketsDbId: TICKETS_DB_ID, configDbId: CONFIG_DB_ID };
@@ -322,6 +340,8 @@ async function loadTicketsFromNotion(dbId, onStatus) {
     autofailsJSON: getProp(page,"Autofails JSON")||"[]", savedAt: getProp(page,"Saved At")||"",
     deleted: page.properties&&page.properties["Deleted"]&&page.properties["Deleted"].checkbox||false,
     deletedBy: getProp(page,"Deleted By")||"", deletedAt: getProp(page,"Deleted At")||"", deleteReason: getProp(page,"Delete Reason")||"",
+    notesHistoryJSON: getProp(page,"Notes History JSON")||"{}", reopenHistoryJSON: getProp(page,"Reopen History JSON")||"[]",
+    auditType: getProp(page,"Audit Type")||"AI Batch",
   }));
 }
 
@@ -401,6 +421,7 @@ async function saveTicketToNotion(dbId, ticket) {
     "Transcript":         { rich_text: rt((ticket.transcript||"").slice(0,1900)) },
     "Autofails JSON":     { rich_text: rt(JSON.stringify(ticket.autofails||[]).slice(0,1900)) },
     "Saved At":           { rich_text: rt(new Date().toISOString()) },
+    "Audit Type":         { rich_text: rt(ticket.auditType||"AI Batch") },
   };
   if (ticket.ticketUrl) props["Ticket URL"] = { url: ticket.ticketUrl };
   const data = await notionAPI("/v1/pages", "POST", { parent: { database_id: dbId }, properties: props });
@@ -510,7 +531,12 @@ function parseNotionRow(r) {
     comments:  r.comments  || r["Comments"]  || "",
     transcript: r.transcript || r["Transcript"] || "",
     autofails,
-    savedAt: r.savedAt || r["Saved At"] || ""
+    savedAt: r.savedAt || r["Saved At"] || "",
+    notesHistoryJSON: r.notesHistoryJSON || r["Notes History JSON"] || "{}",
+    reopenHistoryJSON: r.reopenHistoryJSON || r["Reopen History JSON"] || "[]",
+    auditType: r.auditType || r["Audit Type"] || "AI Batch",
+    deleted: r.deleted || false,
+    deletedBy: r.deletedBy || "", deletedAt: r.deletedAt || "", deleteReason: r.deleteReason || ""
   };
 }
 
@@ -786,7 +812,7 @@ const btnSuccess = { background: "var(--color-background-success)", color: "var(
 const ghost = { background: "transparent", color: "var(--color-text-secondary)", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", padding: "6px 14px", cursor: "pointer", fontSize: "13px" };
 const sectionLabel = { fontSize: "11px", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--color-text-secondary)", margin: "0 0 8px" };
 
-const NAV_TABS = [["batch", "Batch QA"], ["dashboard", "Dashboard"], ["review", "Review"], ["reports", "Reports"], ["matrix", "Matrix"]];
+const NAV_TABS = [["batch", "Batch QA"], ["manual", "Manual Audit"], ["dashboard", "Dashboard"], ["review", "Review"], ["reports", "Reports"], ["matrix", "Matrix"], ["calibration", "Calibration"]];
 
 function App() {
   // ── ALL HOOKS FIRST (React rules of hooks - no hooks after conditional returns) ──
@@ -838,6 +864,29 @@ function App() {
 
   // ── SETTINGS STATE ────────────────────────────────────────────────────────
   const [settingsOpen,setSettingsOpen]=useState(false);
+  // Manual Audit tab
+  const [manualForm,setManualForm]=useState({ticketId:"",agentName:"",contactReason:"",ticketUrl:"",customerEmail:"",week:"",transcript:""});
+  const [manualRunning,setManualRunning]=useState(false);
+  const [manualResult,setManualResult]=useState(null);
+  const [manualStatus,setManualStatus]=useState("");
+  // Calibration tab
+  const [calibrationRunning,setCalibrationRunning]=useState(false);
+  const [calibrationResult,setCalibrationResult]=useState(null);
+  // #2 Agent edit
+  const [editingAgent,setEditingAgent]=useState(false);
+  const [agentEditValue,setAgentEditValue]=useState("");
+  const [savingAgent,setSavingAgent]=useState(false);
+  // #10 Note editing
+  const [editingNote,setEditingNote]=useState(null); // {ticketId, field} or null
+  const [noteEditValue,setNoteEditValue]=useState("");
+  const [savingNote,setSavingNote]=useState(false);
+  const [editingComments,setEditingComments]=useState(false);
+  const [commentsEditValue,setCommentsEditValue]=useState("");
+  const [savingComments,setSavingComments]=useState(false);
+  // Reopen
+  const [reopenPrompt,setReopenPrompt]=useState(false);
+  const [reopenReason,setReopenReason]=useState("");
+  const [savingReopen,setSavingReopen]=useState(false);
   const [settingsTab,setSettingsTab]=useState("access");
   const [userList,setUserList]=useState([]);
   const [userListDirty,setUserListDirty]=useState(false);
@@ -1776,6 +1825,118 @@ Rules:
     downloadBlob(rows.map(function(r){return r.join(",");}).join("\n"),"qa_export_"+Date.now()+".csv","text/csv;charset=utf-8;");
   }
 
+  // ── AGENT EDIT ───────────────────────────────────────────────────────────────
+  async function saveAgentEdit(ticket) {
+    if(!agentEditValue.trim()||agentEditValue===ticket.agentName) { setEditingAgent(false); return; }
+    setSavingAgent(true);
+    try {
+      await notionAPI("/v1/pages/"+ticket.notionPageId,"PATCH",{properties:{"Agent":{rich_text:[{text:{content:agentEditValue.trim()}}]}}});
+      setTickets(function(ts){return ts.map(function(t){return t.notionPageId===ticket.notionPageId?Object.assign({},t,{agentName:agentEditValue.trim()}):t;});});
+      setReviewSelected(function(r){return r?Object.assign({},r,{agentName:agentEditValue.trim()}):r;});
+      addToast("Agent updated");
+      setEditingAgent(false);
+    } catch(e){addToast("Save failed: "+e.message,"error");}
+    setSavingAgent(false);
+  }
+
+  // ── NOTE EDITING ─────────────────────────────────────────────────────────────
+  var catNoteFieldMap={ctf:"CTF Notes",empathy:"Empathy Notes",fcr:"FCR Notes",product:"Product Notes",order:"Order Notes",returns:"Returns Notes",promo:"Promo Notes",retention:"Retention Notes"};
+
+  async function saveNoteEdit(ticket, catId) {
+    if(!noteEditValue.trim()) { addToast("Note cannot be empty","error"); return; }
+    setSavingNote(true);
+    try {
+      var notionField = catNoteFieldMap[catId];
+      var now = new Date().toISOString();
+      var currentNote = (ticket.justifications&&ticket.justifications[catId]&&ticket.justifications[catId].reason)||"";
+      // Load existing history
+      var historyRaw = ticket.notesHistoryJSON||"{}";
+      var history = {};
+      try { history = JSON.parse(historyRaw); } catch(e){}
+      if(!history[catId]) history[catId]=[];
+      // Add original AI note if this is first edit
+      if(history[catId].length===0&&currentNote) {
+        history[catId].push({by:"AI",at:ticket.savedAt||"",content:currentNote});
+      }
+      // Add new edit
+      history[catId].push({by:currentUser.name,at:now,content:noteEditValue.trim()});
+      // Keep max 5 versions per category
+      if(history[catId].length>5) history[catId]=history[catId].slice(-5);
+      var historyStr = JSON.stringify(history).slice(0,1990);
+      var patch = {};
+      patch[notionField] = {rich_text:[{text:{content:noteEditValue.trim().slice(0,1990)}}]};
+      patch["Notes History JSON"] = {rich_text:[{text:{content:historyStr}}]};
+      await notionAPI("/v1/pages/"+ticket.notionPageId,"PATCH",{properties:patch});
+      // Update local state
+      setTickets(function(ts){return ts.map(function(t){
+        if(t.notionPageId!==ticket.notionPageId) return t;
+        var newJust=Object.assign({},t.justifications);
+        newJust[catId]=Object.assign({},newJust[catId]||{},{reason:noteEditValue.trim(),edited:true,editedBy:currentUser.name,editedAt:now});
+        return Object.assign({},t,{justifications:newJust,notesHistoryJSON:historyStr});
+      });});
+      setReviewSelected(function(r){
+        if(!r||r.notionPageId!==ticket.notionPageId) return r;
+        var newJust=Object.assign({},r.justifications);
+        newJust[catId]=Object.assign({},newJust[catId]||{},{reason:noteEditValue.trim(),edited:true,editedBy:currentUser.name,editedAt:now});
+        return Object.assign({},r,{justifications:newJust,notesHistoryJSON:historyStr});
+      });
+      addToast("Note updated");
+      setEditingNote(null);
+    } catch(e){addToast("Save failed: "+e.message,"error");}
+    setSavingNote(false);
+  }
+
+  async function saveCommentsEdit(ticket) {
+    if(!commentsEditValue.trim()) { addToast("Comments cannot be empty","error"); return; }
+    setSavingComments(true);
+    try {
+      var now = new Date().toISOString();
+      var historyRaw = ticket.notesHistoryJSON||"{}";
+      var history = {};
+      try { history = JSON.parse(historyRaw); } catch(e){}
+      if(!history["comments"]) history["comments"]=[];
+      if(history["comments"].length===0&&ticket.comments) {
+        history["comments"].push({by:"AI",at:ticket.savedAt||"",content:ticket.comments});
+      }
+      history["comments"].push({by:currentUser.name,at:now,content:commentsEditValue.trim()});
+      if(history["comments"].length>5) history["comments"]=history["comments"].slice(-5);
+      var historyStr = JSON.stringify(history).slice(0,1990);
+      await notionAPI("/v1/pages/"+ticket.notionPageId,"PATCH",{properties:{
+        "Comments":{rich_text:[{text:{content:commentsEditValue.trim().slice(0,1990)}}]},
+        "Notes History JSON":{rich_text:[{text:{content:historyStr}}]}
+      }});
+      setTickets(function(ts){return ts.map(function(t){return t.notionPageId===ticket.notionPageId?Object.assign({},t,{comments:commentsEditValue.trim(),commentsEdited:true,notesHistoryJSON:historyStr}):t;});});
+      setReviewSelected(function(r){return r&&r.notionPageId===ticket.notionPageId?Object.assign({},r,{comments:commentsEditValue.trim(),commentsEdited:true,notesHistoryJSON:historyStr}):r;});
+      addToast("Comments updated");
+      setEditingComments(false);
+    } catch(e){addToast("Save failed: "+e.message,"error");}
+    setSavingComments(false);
+  }
+
+  // ── REOPEN TICKET ─────────────────────────────────────────────────────────────
+  async function saveReopen(ticket, reason) {
+    setSavingReopen(true);
+    try {
+      var now = new Date().toISOString();
+      var historyRaw = ticket.reopenHistoryJSON||"[]";
+      var history = [];
+      try { history = JSON.parse(historyRaw); } catch(e){}
+      history.push({by:currentUser.name,at:now,reason:reason.trim()});
+      var historyStr = JSON.stringify(history).slice(0,1990);
+      await notionAPI("/v1/pages/"+ticket.notionPageId,"PATCH",{properties:{
+        "Reviewed":{checkbox:false},
+        "Reopen History JSON":{rich_text:[{text:{content:historyStr}}]}
+      }});
+      setTickets(function(ts){return ts.map(function(t){return t.notionPageId===ticket.notionPageId?Object.assign({},t,{reviewed:false,reopenHistoryJSON:historyStr}):t;});});
+      setReviewSelected(function(r){return r&&r.notionPageId===ticket.notionPageId?Object.assign({},r,{reviewed:false,reopenHistoryJSON:historyStr}):r;});
+      setReviewedTickets(function(rt){var n=Object.assign({},rt);delete n[ticket.id||ticket.ticketId];return n;});
+      addToast("Ticket reopened");
+      setReopenPrompt(false);
+      setReopenReason("");
+    } catch(e){addToast("Reopen failed: "+e.message,"error");}
+    setSavingReopen(false);
+  }
+
   // ── USER MANAGEMENT ─────────────────────────────────────────────────────────
   // Seed from hardcoded USERS if Notion has none yet
   function hardcodedUsersArray() {
@@ -1842,6 +2003,99 @@ Rules:
 
   // Derive effective user list for app logic — merge Notion users with hardcoded fallback
   var effectiveUsers = userList.length > 0 ? userList : hardcodedUsersArray();
+
+  // ── MANUAL AUDIT ─────────────────────────────────────────────────────────────
+  async function runManualAudit() {
+    if(!manualForm.ticketId.trim()||!manualForm.agentName||!manualForm.transcript.trim()) {
+      addToast("Ticket ID, Agent and Transcript are required","error"); return;
+    }
+    setManualRunning(true); setManualResult(null); setManualStatus("Scoring ticket with AI...");
+    try {
+      // Build prompt identical to batch QA
+      var justSchema=matrix.map(function(c){return '"'+c.id+'":{reason:"",improve:""}';}).join(",");
+      var scoreOptions=matrix.map(function(c){return c.id+": "+c.levels.map(function(l){return l.level+(l.points!==null?" ("+l.points+")":"");}).join("/");}).join("; ");
+      var prompt = "You are a QA analyst for Freedom Grooming customer support. Score this ticket against the rubric.\n\nSCORING: "+scoreOptions+".\nUse NA if category doesn't apply.\n\n"
+        +"AUTOFAIL CONDITIONS:\n1. Failing to complete promised resolution\n2. Wrong account-level action\n3. Financial/operational risk through incorrect workflow\n4. Materially inaccurate policy info\n5. Tone that materially worsens risk\n\n"
+        +"TICKET INFO:\nAgent: "+manualForm.agentName+"\nContact Reason: "+(manualForm.contactReason||"Unknown")+"\n\n"
+        +"TRANSCRIPT:\n"+manualForm.transcript+"
+
+"
+        +"Respond ONLY with valid JSON matching exactly:\n{"
+        +'"scores":{'+matrix.map(function(c){return '"'+c.id+'":"YES/PARTIAL/NO/NA (points)"';}).join(",")+'},'
+        +'"justifications":{'+justSchema+'},'
+        +'"autofails":[],'
+        +'"comments":"+ [key strength observation]\n- [key improvement observation]"}';
+
+      var result = await callClaudeWithRetry(prompt);
+      var parsed = tryParseJSON(result);
+      if(!parsed||!parsed.scores){addToast("AI scoring failed — invalid response","error");setManualRunning(false);setManualStatus("");return;}
+
+      var aiScores=parsed.scores||{};
+      var justifications=parsed.justifications||{};
+      var autofailsList=parsed.autofails||[];
+      var comments=parsed.comments||"";
+
+      // Calculate score
+      var pts=0,mx=0;
+      matrix.forEach(function(c){var v=aiScores[c.id]||"";if(!v||v.toUpperCase()==="NA")return;var m=String(v).match(/\(([\d.]+)\)/);if(m){pts+=parseFloat(m[1]);mx+=c['max'];}});
+      var aiScore=mx>0?Math.round(pts/mx*100):0;
+      var passed=aiScore>=PASS_THRESHOLD;
+      var autofail=autofailsList.length>0;
+      var now=new Date().toISOString();
+      var week=manualForm.week||"Manual - "+now.slice(0,10);
+
+      var ticket={
+        ticketId:manualForm.ticketId.trim(), agentName:manualForm.agentName, reviewer:currentUser.name,
+        contactReason:manualForm.contactReason, ticketUrl:manualForm.ticketUrl, week:week,
+        transcript:manualForm.transcript, aiScore, finalScore:aiScore, passed, autofail,
+        aiScores, scores:aiScores, justifications, autofails:autofailsList, comments,
+        disputes:{}, hasDisputes:false, createdDate:"", auditType:"Manual", savedAt:now,
+      };
+
+      setManualStatus("Saving to Notion...");
+      var saved=await saveTicketToNotion(TICKETS_DB_ID,ticket);
+      ticket.notionPageId=saved.id; ticket.id=saved.id;
+      setTickets(function(ts){return [parseNotionRow(Object.assign({pageId:saved.id},ticket))].concat(ts);});
+      setManualResult(ticket);
+      addToast("Manual audit saved — "+aiScore+"%");
+    } catch(e){addToast("Error: "+e.message,"error");}
+    setManualRunning(false); setManualStatus("");
+  }
+
+  // ── CALIBRATION ───────────────────────────────────────────────────────────────
+  async function runCalibration() {
+    var disputed=tickets.filter(function(t){return t.hasDisputes||(t.disputes&&Object.keys(t.disputes).length>0);});
+    if(disputed.length<10){addToast("Need at least 10 disputed tickets for calibration (currently "+disputed.length+")","error");return;}
+    setCalibrationRunning(true); setCalibrationResult(null);
+    try {
+      // Build analysis input
+      var disputeData=disputed.map(function(t){
+        var cats=Object.entries(t.disputes||{}).map(function(e){
+          var catId=e[0],d=e[1];
+          var c=matrix.find(function(m){return m.id===catId;})||{label:catId};
+          return {category:c.label,aiScore:t.aiScores&&t.aiScores[catId],finalScore:d.finalScore,justification:d.justification,disputer:d.disputer};
+        });
+        return {ticketId:t.ticketId,agent:t.agentName,contactReason:t.contactReason,disputes:cats};
+      });
+
+      var prompt="You are a QA calibration analyst for Freedom Grooming customer support. Analyze the following disputed tickets and provide calibration recommendations.\n\n"
+        +"CURRENT SCORING RUBRIC:\n"+matrix.map(function(c){return c.label+": "+c.levels.map(function(l){return l.level+(l.points!==null?" ("+l.points+")":"");}).join("/");}).join("\n")+"\n\n"
+        +"DISPUTED TICKETS ("+disputed.length+" total):\n"+JSON.stringify(disputeData,null,2).slice(0,8000)+"\n\n"
+        +"Analyze the dispute patterns and provide:\n"
+        +"1. Category calibration: which categories does the AI consistently over/under-score vs auditors?\n"
+        +"2. Rubric gaps: where are the scoring criteria unclear or inconsistently applied?\n"
+        +"3. Prompt improvements: specific wording changes to improve AI scoring accuracy\n"
+        +"4. Quick wins: 2-3 immediate changes with the highest impact\n"
+        +"5. Overall assessment: is the AI scoring aligned with human judgment?\n\n"
+        +"Format your response with clear section headers. Be specific — reference actual categories, dispute justifications, and patterns you observe.\n"
+        +"Return plain text only, no JSON.";
+
+      var result=await callClaudeWithRetry(prompt);
+      setCalibrationResult(result);
+      addToast("Calibration analysis complete");
+    } catch(e){addToast("Calibration failed: "+e.message,"error");}
+    setCalibrationRunning(false);
+  }
 
   async function loadAllData(setup) {
     setLoading(true);
@@ -2056,6 +2310,7 @@ Rules:
               <button onClick={handleLogout} style={{background:"none",border:"none",cursor:"pointer",fontSize:"11px",color:"var(--color-text-secondary)",padding:"0 0 0 4px"}}>Sign out</button>
             </div>
             {isEditor&&<button onClick={function(){setSettingsOpen(true);}} title="Settings" style={{background:"none",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",cursor:"pointer",fontSize:"15px",padding:"5px 9px",color:"var(--color-text-secondary)",lineHeight:1}}>⚙</button>}
+            <span style={{fontSize:"10px",color:"var(--color-text-secondary)",fontWeight:500,padding:"3px 7px",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)",letterSpacing:"0.04em"}}>{APP_VERSION}</span>
           </div>
         </div>
       </div>
@@ -2065,6 +2320,8 @@ Rules:
         {NAV_TABS.filter(function(pair){
           if(!isEditor&&pair[0]==="batch")return false;
           if(!isFullAccess&&pair[0]==="matrix")return false;
+          if(!isEditor&&pair[0]==="manual")return false;
+          if(!isFullAccess&&pair[0]==="calibration")return false;
           return true;
         }).map(function(pair){
           return <button key={pair[0]} style={tabStyle(view===pair[0])} onClick={function(){setView(pair[0]);}}>{pair[1]}{pair[0]==="batch"&&batchTickets.length>0&&<span style={{marginLeft:"5px",fontSize:"10px",fontWeight:700,padding:"1px 6px",borderRadius:"999px",background:"var(--color-background-info)",color:"var(--color-text-info)"}}>{batchTickets.length}</span>}</button>;
@@ -2369,9 +2626,29 @@ Rules:
               {/* Ticket info bar */}
               <div style={{...card,marginBottom:"12px"}}>
                 <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(140px,1fr))",gap:"10px",marginBottom:"12px"}}>
-                  {[["Ticket",reviewSelected.ticketId],["Agent",reviewSelected.agentName],["Auditor",reviewSelected.reviewer],["Week",reviewSelected.week],["Contact reason",reviewSelected.contactReason]].map(function(p){
+                  {[["Ticket",reviewSelected.ticketId],["Auditor",reviewSelected.reviewer],["Week",reviewSelected.week],["Contact reason",reviewSelected.contactReason]].map(function(p){
                     return <div key={p[0]}><span style={{fontSize:"11px",color:"var(--color-text-secondary)",display:"block",marginBottom:"2px"}}>{p[0]}</span><span style={{fontSize:"13px",fontWeight:500}}>{p[1]||"—"}</span></div>;
                   })}
+                  <div>
+                    <span style={{fontSize:"11px",color:"var(--color-text-secondary)",display:"block",marginBottom:"2px"}}>Agent</span>
+                    {isEditor&&editingAgent?(
+                      <div style={{display:"flex",gap:"6px",alignItems:"center"}}>
+                        <select value={agentEditValue} onChange={function(e){setAgentEditValue(e.target.value);}}
+                          style={{fontSize:"12px",padding:"3px 6px",border:"0.5px solid var(--color-border-info)",borderRadius:"var(--border-radius-md)",flex:1}}>
+                          {AGENT_LIST.map(function(a){return <option key={a} value={a}>{a}</option>;})}
+                        </select>
+                        <button onClick={function(){saveAgentEdit(reviewSelected);}} disabled={savingAgent} style={{...btnInfo,fontSize:"11px",padding:"3px 8px"}}>
+                          {savingAgent?"...":"Save"}
+                        </button>
+                        <button onClick={function(){setEditingAgent(false);}} style={{...ghost,fontSize:"11px",padding:"3px 8px"}}>✕</button>
+                      </div>
+                    ):(
+                      <div style={{display:"flex",alignItems:"center",gap:"6px"}}>
+                        <span style={{fontSize:"13px",fontWeight:500}}>{reviewSelected.agentName||"—"}</span>
+                        {isEditor&&<button onClick={function(){setAgentEditValue(reviewSelected.agentName||"");setEditingAgent(true);}} style={{fontSize:"10px",padding:"1px 6px",background:"none",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",cursor:"pointer",color:"var(--color-text-secondary)"}}>Edit</button>}
+                      </div>
+                    )}
+                  </div>
                 </div>
                 {/* Score summary */}
                 <div style={{display:"flex",gap:"12px",flexWrap:"wrap"}}>
@@ -2455,11 +2732,31 @@ Rules:
                         <div style={{color:"var(--color-text-secondary)",marginTop:"2px"}}>{existingDispute.justification}</div>
                       </div>}
 
-                      {/* AI justification */}
+                      {/* AI justification — editable by Edit+ */}
                       {!isEditing&&!isDisputed&&reviewSelected.justifications&&reviewSelected.justifications[c.id]&&(
-                        <div style={{marginTop:"6px",fontSize:"12px",color:"var(--color-text-secondary)",lineHeight:"1.5"}}>
-                          {reviewSelected.justifications[c.id].reason}
-                          {reviewSelected.justifications[c.id].improve&&reviewSelected.justifications[c.id].improve!=="null"&&<span style={{color:"var(--color-text-info)"}}> ↑ {reviewSelected.justifications[c.id].improve}</span>}
+                        <div style={{marginTop:"6px"}}>
+                          {editingNote&&editingNote.ticketId===reviewSelected.notionPageId&&editingNote.field===c.id?(
+                            <div>
+                              <textarea
+                                value={noteEditValue}
+                                onChange={function(e){setNoteEditValue(e.target.value);}}
+                                style={{width:"100%",boxSizing:"border-box",height:"70px",resize:"vertical",fontFamily:"inherit",fontSize:"12px",lineHeight:"1.5",padding:"6px 8px",border:"0.5px solid var(--color-border-info)",borderRadius:"var(--border-radius-md)",marginBottom:"6px"}}
+                              />
+                              <div style={{display:"flex",gap:"6px"}}>
+                                <button onClick={function(){saveNoteEdit(reviewSelected,c.id);}} disabled={savingNote} style={{...btnInfo,fontSize:"11px",padding:"4px 10px"}}>{savingNote?"Saving...":"Save"}</button>
+                                <button onClick={function(){setEditingNote(null);}} style={{...ghost,fontSize:"11px",padding:"4px 10px"}}>Cancel</button>
+                              </div>
+                            </div>
+                          ):(
+                            <div>
+                              <div style={{fontSize:"12px",color:"var(--color-text-secondary)",lineHeight:"1.5"}}>
+                                {reviewSelected.justifications[c.id].reason}
+                                {reviewSelected.justifications[c.id].improve&&reviewSelected.justifications[c.id].improve!=="null"&&<span style={{color:"var(--color-text-info)"}}> ↑ {reviewSelected.justifications[c.id].improve}</span>}
+                                {reviewSelected.justifications[c.id].edited&&<span style={{fontSize:"10px",marginLeft:"6px",padding:"1px 5px",background:"var(--color-background-info)",color:"var(--color-text-info)",borderRadius:"3px",border:"0.5px solid var(--color-border-info)"}}>Edited</span>}
+                              </div>
+                              {isEditor&&<button onClick={function(){setEditingNote({ticketId:reviewSelected.notionPageId,field:c.id});setNoteEditValue(reviewSelected.justifications[c.id].reason||"");}} style={{fontSize:"10px",padding:"1px 7px",background:"none",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",cursor:"pointer",color:"var(--color-text-secondary)",marginTop:"4px"}}>Edit note</button>}
+                            </div>
+                          )}
                         </div>
                       )}
 
@@ -2492,25 +2789,43 @@ Rules:
                 })}
               </div>
 
-              {/* Comments */}
+              {/* Comments — editable by Edit+ */}
               {reviewSelected.comments&&(
                 <div style={{...card,marginBottom:"12px"}}>
-                  <p style={{...sectionLabel,marginBottom:"8px"}}>AI comments</p>
-                  {reviewSelected.comments.split("\n").filter(function(l){
-                    var s=l.trim();
-                    if(!s) return false;
-                    // Skip bare header labels
-                    var lower=s.replace(/^[+-]\s*/,"").toLowerCase();
-                    if((lower==="strength"||lower==="strengths"||lower==="improvement"||lower==="improvements")&&s.length<20) return false;
-                    return true;
-                  }).map(function(line,i){
-                    var s=line.trim();
-                    var isPos=s.charAt(0)==="+";var isNeg=s.charAt(0)==="-";
-                    var col=isPos?T.green.text:isNeg?T.amber.text:"var(--color-text-secondary)";
-                    // Strip the +/- prefix for display
-                    var text=isPos||isNeg?s.slice(1).replace(/^\s*(strength|improvement)[:\s]*/i,"").trim():s;
-                    return <p key={i} style={{margin:"0 0 6px",fontSize:"13px",color:col,lineHeight:"1.6"}}>{(isPos?"+ ":isNeg?"- ":"")+text}</p>;
-                  })}
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"8px"}}>
+                    <div style={{display:"flex",alignItems:"center",gap:"6px"}}>
+                      <p style={{...sectionLabel,margin:0}}>AI comments</p>
+                      {reviewSelected.commentsEdited&&<span style={{fontSize:"10px",padding:"1px 5px",background:"var(--color-background-info)",color:"var(--color-text-info)",borderRadius:"3px",border:"0.5px solid var(--color-border-info)"}}>Edited</span>}
+                    </div>
+                    {isEditor&&!editingComments&&<button onClick={function(){setCommentsEditValue(reviewSelected.comments);setEditingComments(true);}} style={{fontSize:"10px",padding:"2px 8px",background:"none",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",cursor:"pointer",color:"var(--color-text-secondary)"}}>Edit</button>}
+                  </div>
+                  {editingComments?(
+                    <div>
+                      <textarea
+                        value={commentsEditValue}
+                        onChange={function(e){setCommentsEditValue(e.target.value);}}
+                        style={{width:"100%",boxSizing:"border-box",height:"100px",resize:"vertical",fontFamily:"inherit",fontSize:"13px",lineHeight:"1.6",padding:"8px 10px",border:"0.5px solid var(--color-border-info)",borderRadius:"var(--border-radius-md)",marginBottom:"8px"}}
+                      />
+                      <div style={{display:"flex",gap:"6px"}}>
+                        <button onClick={function(){saveCommentsEdit(reviewSelected);}} disabled={savingComments} style={{...btnInfo,fontSize:"11px",padding:"5px 12px"}}>{savingComments?"Saving...":"Save"}</button>
+                        <button onClick={function(){setEditingComments(false);}} style={{...ghost,fontSize:"11px",padding:"5px 12px"}}>Cancel</button>
+                      </div>
+                    </div>
+                  ):(
+                    reviewSelected.comments.split("\n").filter(function(l){
+                      var s=l.trim();
+                      if(!s) return false;
+                      var lower=s.replace(/^[+-]\s*/,"").toLowerCase();
+                      if((lower==="strength"||lower==="strengths"||lower==="improvement"||lower==="improvements")&&s.length<20) return false;
+                      return true;
+                    }).map(function(line,i){
+                      var s=line.trim();
+                      var isPos=s.charAt(0)==="+";var isNeg=s.charAt(0)==="-";
+                      var col=isPos?T.green.text:isNeg?T.amber.text:"var(--color-text-secondary)";
+                      var text=isPos||isNeg?s.slice(1).replace(/^\s*(strength|improvement)[:\s]*/i,"").trim():s;
+                      return <p key={i} style={{margin:"0 0 6px",fontSize:"13px",color:col,lineHeight:"1.6"}}>{(isPos?"+ ":isNeg?"- ":"")+text}</p>;
+                    })
+                  )}
                 </div>
               )}
 
@@ -2580,13 +2895,133 @@ Rules:
                       </div>
                     )}
                     {isReviewed&&(
-                      <div style={{textAlign:"center",padding:"10px",fontSize:"12px",color:"var(--color-text-success)",fontWeight:600,background:"var(--color-background-success)",borderRadius:"var(--border-radius-md)",border:"0.5px solid var(--color-border-success)"}}>
-                        ✓ Reviewed by {reviewSelected.reviewedBy||"auditor"}{reviewSelected.reviewerNotes?" · has notes":""}
+                      <div style={{display:"flex",gap:"8px",alignItems:"center"}}>
+                        <div style={{flex:1,textAlign:"center",padding:"10px",fontSize:"12px",color:"var(--color-text-success)",fontWeight:600,background:"var(--color-background-success)",borderRadius:"var(--border-radius-md)",border:"0.5px solid var(--color-border-success)"}}>
+                          ✓ Reviewed by {reviewSelected.reviewedBy||"auditor"}{reviewSelected.reviewerNotes?" · has notes":""}
+                        </div>
+                        {isEditor&&(
+                          reopenPrompt?(
+                            <div style={{flex:1,display:"flex",flexDirection:"column",gap:"6px",padding:"10px",background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)",border:"0.5px solid var(--color-border-secondary)"}}>
+                              <input
+                                type="text"
+                                placeholder="Reason for reopening (required)..."
+                                value={reopenReason}
+                                onChange={function(e){setReopenReason(e.target.value);}}
+                                style={{fontSize:"12px",padding:"5px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",width:"100%",boxSizing:"border-box"}}
+                              />
+                              <div style={{display:"flex",gap:"6px"}}>
+                                <button onClick={function(){
+                                  if(!reopenReason.trim()){addToast("Please enter a reason","error");return;}
+                                  saveReopen(reviewSelected,reopenReason);
+                                }} disabled={savingReopen} style={{...btnInfo,fontSize:"11px",padding:"4px 10px",flex:1}}>{savingReopen?"Reopening...":"Confirm reopen"}</button>
+                                <button onClick={function(){setReopenPrompt(false);setReopenReason("");}} style={{...ghost,fontSize:"11px",padding:"4px 10px"}}>Cancel</button>
+                              </div>
+                            </div>
+                          ):(
+                            <button onClick={function(){setReopenPrompt(true);}} style={{...ghost,fontSize:"12px",padding:"10px 14px",whiteSpace:"nowrap"}}>↺ Reopen</button>
+                          )
+                        )}
                       </div>
                     )}
                   </div>
                 );
               })()}
+            </div>
+          )}
+        </div>
+      )}
+
+            {/* ── MANUAL AUDIT TAB ── */}
+      {view==="manual"&&isEditor&&(
+        <div>
+          <div style={{...card,marginBottom:"16px"}}>
+            <p style={{...sectionLabel,marginBottom:"14px"}}>Manual Audit</p>
+            <p style={{fontSize:"12px",color:"var(--color-text-secondary)",marginBottom:"16px"}}>Score a single ticket manually. Paste the transcript and fill in ticket details — AI will score it using the same rubric as batch QA.</p>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"12px",marginBottom:"12px"}}>
+              <div>
+                <label style={{...lbl,marginBottom:"4px"}}>Ticket ID *</label>
+                <input type="text" placeholder="e.g. 443167229" value={manualForm.ticketId}
+                  onChange={function(e){setManualForm(function(f){return Object.assign({},f,{ticketId:e.target.value});});}}
+                  style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+              </div>
+              <div>
+                <label style={{...lbl,marginBottom:"4px"}}>Agent *</label>
+                <select value={manualForm.agentName}
+                  onChange={function(e){setManualForm(function(f){return Object.assign({},f,{agentName:e.target.value});});}}
+                  style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}>
+                  <option value="">Select agent...</option>
+                  {AGENT_LIST.map(function(a){return <option key={a} value={a}>{a}</option>;})}
+                </select>
+              </div>
+              <div>
+                <label style={{...lbl,marginBottom:"4px"}}>Contact Reason</label>
+                <input type="text" placeholder="e.g. Cancel::Subscription (Aware)" value={manualForm.contactReason}
+                  onChange={function(e){setManualForm(function(f){return Object.assign({},f,{contactReason:e.target.value});});}}
+                  style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+              </div>
+              <div>
+                <label style={{...lbl,marginBottom:"4px"}}>Ticket URL</label>
+                <input type="text" placeholder="https://freedomgrooming.gorgias.com/..." value={manualForm.ticketUrl}
+                  onChange={function(e){setManualForm(function(f){return Object.assign({},f,{ticketUrl:e.target.value});});}}
+                  style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+              </div>
+              <div>
+                <label style={{...lbl,marginBottom:"4px"}}>Customer Email</label>
+                <input type="text" placeholder="customer@email.com" value={manualForm.customerEmail}
+                  onChange={function(e){setManualForm(function(f){return Object.assign({},f,{customerEmail:e.target.value});});}}
+                  style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+              </div>
+              <div>
+                <label style={{...lbl,marginBottom:"4px"}}>Week</label>
+                <input type="text" placeholder="e.g. Apr 27 - May 3 2026" value={manualForm.week}
+                  onChange={function(e){setManualForm(function(f){return Object.assign({},f,{week:e.target.value});});}}
+                  style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+              </div>
+            </div>
+            <div style={{marginBottom:"14px"}}>
+              <label style={{...lbl,marginBottom:"4px"}}>Transcript * — paste directly from Gorgias</label>
+              <textarea value={manualForm.transcript}
+                onChange={function(e){setManualForm(function(f){return Object.assign({},f,{transcript:e.target.value});});}}
+                placeholder="Paste the full ticket conversation here..."
+                style={{width:"100%",boxSizing:"border-box",height:"220px",resize:"vertical",fontFamily:"inherit",fontSize:"12px",lineHeight:"1.6",padding:"8px 10px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+            </div>
+            {manualStatus&&<div style={{fontSize:"12px",color:"var(--color-text-info)",marginBottom:"10px"}}>{manualStatus}</div>}
+            <div style={{display:"flex",gap:"8px"}}>
+              <button onClick={runManualAudit} disabled={manualRunning}
+                style={{...btnSuccess,padding:"10px 24px",fontSize:"13px",opacity:manualRunning?0.6:1}}>
+                {manualRunning?"Scoring...":"Run AI Audit"}
+              </button>
+              <button onClick={function(){setManualForm({ticketId:"",agentName:"",contactReason:"",ticketUrl:"",customerEmail:"",week:"",transcript:""});setManualResult(null);}} style={ghost}>Clear</button>
+            </div>
+          </div>
+          {/* Result */}
+          {manualResult&&(
+            <div style={card}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"12px"}}>
+                <p style={{...sectionLabel,margin:0}}>Result — Ticket #{manualResult.ticketId}</p>
+                <div style={{display:"flex",gap:"8px",alignItems:"center"}}>
+                  {(function(){var tone=scoreTone(manualResult.aiScore);return <span style={{fontSize:"20px",fontWeight:700,color:tone.text}}>{manualResult.aiScore}%</span>;}())}
+                  <span style={{fontSize:"11px",fontWeight:700,padding:"2px 8px",borderRadius:"3px",
+                    background:manualResult.autofail?"var(--color-background-danger)":manualResult.passed?"var(--color-background-success)":"var(--color-background-danger)",
+                    color:manualResult.autofail?"var(--color-text-danger)":manualResult.passed?"var(--color-text-success)":"var(--color-text-danger)"
+                  }}>{manualResult.autofail?"Autofail":manualResult.passed?"Pass":"Fail"}</span>
+                </div>
+              </div>
+              {matrix.map(function(c){
+                var v=manualResult.aiScores&&manualResult.aiScores[c.id]||"";
+                var lbl2=scoreLabel(v);
+                if(!lbl2&&v.toUpperCase()!=="NA") return null;
+                var j=manualResult.justifications&&manualResult.justifications[c.id];
+                return <div key={c.id} style={{padding:"8px 0",borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                    <span style={{fontSize:"12px",fontWeight:500}}>{c.label}</span>
+                    {lbl2?<ScorePill label={lbl2}/>:<span style={{fontSize:"11px",color:"var(--color-text-secondary)"}}>NA</span>}
+                  </div>
+                  {j&&j.reason&&<div style={{fontSize:"11px",color:"var(--color-text-secondary)",marginTop:"3px",lineHeight:"1.5"}}>{j.reason}</div>}
+                </div>;
+              })}
+              {manualResult.comments&&<div style={{marginTop:"12px",paddingTop:"12px",borderTop:"0.5px solid var(--color-border-tertiary)",fontSize:"12px",color:"var(--color-text-secondary)",lineHeight:"1.6"}}>{manualResult.comments}</div>}
+              <div style={{marginTop:"12px",fontSize:"11px",color:"var(--color-text-success)"}}>✓ Saved to Notion as Manual audit</div>
             </div>
           )}
         </div>
@@ -3178,6 +3613,61 @@ Rules:
               <button onClick={function(){addCtfEntry(ctfTab);}} style={btnInfo}>Add</button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* ── CALIBRATION TAB ── */}
+      {view==="calibration"&&isFullAccess&&(
+        <div>
+          <div style={{...card,marginBottom:"16px"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"10px",flexWrap:"wrap",gap:"8px"}}>
+              <div>
+                <p style={{margin:"0 0 4px",fontSize:"15px",fontWeight:600}}>AI Calibration Analysis</p>
+                <p style={{margin:0,fontSize:"12px",color:"var(--color-text-secondary)"}}>Analyzes disputed tickets to surface patterns and recommend rubric or prompt improvements.</p>
+              </div>
+              {(function(){
+                var disputed=tickets.filter(function(t){return t.hasDisputes||(t.disputes&&Object.keys(t.disputes).length>0);});
+                var tooFew=disputed.length<10;
+                return(
+                  <div style={{textAlign:"right"}}>
+                    <div style={{fontSize:"12px",color:tooFew?"var(--color-text-danger)":"var(--color-text-secondary)",marginBottom:"6px"}}>
+                      {disputed.length} disputed ticket{disputed.length!==1?"s":""} available{tooFew?" (minimum 10 required)":""}
+                    </div>
+                    <button onClick={runCalibration} disabled={calibrationRunning||tooFew}
+                      style={{...btnInfo,opacity:calibrationRunning||tooFew?0.5:1}}>
+                      {calibrationRunning?"Analyzing...":"Run calibration analysis"}
+                    </button>
+                  </div>
+                );
+              })()}
+            </div>
+            {(function(){
+              var disputed=tickets.filter(function(t){return t.hasDisputes||(t.disputes&&Object.keys(t.disputes).length>0);});
+              if(disputed.length<10) return(
+                <div style={{padding:"12px 14px",background:"var(--color-background-warning)",border:"0.5px solid var(--color-border-warning)",borderRadius:"var(--border-radius-md)",fontSize:"12px",color:"var(--color-text-warning)"}}>
+                  ⚠ Not enough disputed tickets yet. At least 10 are needed for meaningful pattern analysis. Currently {disputed.length} available.
+                </div>
+              );
+              return null;
+            })()}
+          </div>
+          {calibrationResult&&(
+            <div style={card}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"14px"}}>
+                <p style={{...sectionLabel,margin:0}}>Calibration recommendations</p>
+                <button onClick={function(){
+                  var blob=new Blob([calibrationResult],{type:"text/plain"});
+                  var url=URL.createObjectURL(blob);
+                  var a=document.createElement("a");a.href=url;a.download="FG_QA_Calibration_"+new Date().toISOString().slice(0,10)+".txt";
+                  document.body.appendChild(a);a.click();document.body.removeChild(a);
+                  setTimeout(function(){URL.revokeObjectURL(url);},1000);
+                }} style={{...ghost,fontSize:"11px"}}>Export as .txt</button>
+              </div>
+              <div style={{fontSize:"13px",color:"var(--color-text-primary)",lineHeight:"1.8",whiteSpace:"pre-wrap"}}>
+                {calibrationResult}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
