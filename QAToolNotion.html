@@ -2,8 +2,12 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  1.7.0
+  Version:  1.7.1
   Date:     2026-05-12
+
+  Changelog:
+  v1.7.1 (2026-05-12)
+    - Fix: Babel syntax error in Manual Audit prompt (literal newlines in string)
 
   Changelog:
   v1.7.0 (2026-05-12)
@@ -203,7 +207,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v1.7.0";
+const APP_VERSION = "v1.7.1";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
 const CONFIG_DB_ID = "3574e96c994180c08a40f31e89db80ce";
@@ -2017,9 +2021,7 @@ Rules:
       var prompt = "You are a QA analyst for Freedom Grooming customer support. Score this ticket against the rubric.\n\nSCORING: "+scoreOptions+".\nUse NA if category doesn't apply.\n\n"
         +"AUTOFAIL CONDITIONS:\n1. Failing to complete promised resolution\n2. Wrong account-level action\n3. Financial/operational risk through incorrect workflow\n4. Materially inaccurate policy info\n5. Tone that materially worsens risk\n\n"
         +"TICKET INFO:\nAgent: "+manualForm.agentName+"\nContact Reason: "+(manualForm.contactReason||"Unknown")+"\n\n"
-        +"TRANSCRIPT:\n"+manualForm.transcript+"
-
-"
+        +"TRANSCRIPT:\\n"+manualForm.transcript+"\\n\\n"
         +"Respond ONLY with valid JSON matching exactly:\n{"
         +'"scores":{'+matrix.map(function(c){return '"'+c.id+'":"YES/PARTIAL/NO/NA (points)"';}).join(",")+'},'
         +'"justifications":{'+justSchema+'},'
