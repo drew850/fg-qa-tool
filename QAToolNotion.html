@@ -2,8 +2,18 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  1.7.1
+  Version:  1.7.3
   Date:     2026-05-12
+
+  Changelog:
+  v1.7.3 (2026-05-12)
+    - Calibration tab: structured card-based report (Category Analysis, Rubric Gaps, Prompt Improvements, Quick Wins, Agent Patterns)
+    - Calibration tab: downloadable as .doc (matches team insight style)
+    - Calibration tab: AI now returns structured JSON instead of plain text
+
+  Changelog:
+  v1.7.2 (2026-05-12)
+    - Feedback #11: Average Score stat card added to Dashboard (color-coded, uses final/disputed score)
 
   Changelog:
   v1.7.1 (2026-05-12)
@@ -207,7 +217,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v1.7.1";
+const APP_VERSION = "v1.7.3";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
 const CONFIG_DB_ID = "3574e96c994180c08a40f31e89db80ce";
@@ -2070,33 +2080,127 @@ Rules:
     if(disputed.length<10){addToast("Need at least 10 disputed tickets for calibration (currently "+disputed.length+")","error");return;}
     setCalibrationRunning(true); setCalibrationResult(null);
     try {
-      // Build analysis input
       var disputeData=disputed.map(function(t){
         var cats=Object.entries(t.disputes||{}).map(function(e){
           var catId=e[0],d=e[1];
           var c=matrix.find(function(m){return m.id===catId;})||{label:catId};
-          return {category:c.label,aiScore:t.aiScores&&t.aiScores[catId],finalScore:d.finalScore,justification:d.justification,disputer:d.disputer};
+          return {category:c.label,aiScore:t.aiScores&&t.aiScores[catId],finalScore:d.finalScore,justification:d.justification};
         });
         return {ticketId:t.ticketId,agent:t.agentName,contactReason:t.contactReason,disputes:cats};
       });
 
-      var prompt="You are a QA calibration analyst for Freedom Grooming customer support. Analyze the following disputed tickets and provide calibration recommendations.\n\n"
-        +"CURRENT SCORING RUBRIC:\n"+matrix.map(function(c){return c.label+": "+c.levels.map(function(l){return l.level+(l.points!==null?" ("+l.points+")":"");}).join("/");}).join("\n")+"\n\n"
-        +"DISPUTED TICKETS ("+disputed.length+" total):\n"+JSON.stringify(disputeData,null,2).slice(0,8000)+"\n\n"
-        +"Analyze the dispute patterns and provide:\n"
-        +"1. Category calibration: which categories does the AI consistently over/under-score vs auditors?\n"
-        +"2. Rubric gaps: where are the scoring criteria unclear or inconsistently applied?\n"
-        +"3. Prompt improvements: specific wording changes to improve AI scoring accuracy\n"
-        +"4. Quick wins: 2-3 immediate changes with the highest impact\n"
-        +"5. Overall assessment: is the AI scoring aligned with human judgment?\n\n"
-        +"Format your response with clear section headers. Be specific — reference actual categories, dispute justifications, and patterns you observe.\n"
-        +"Return plain text only, no JSON.";
+      // Category dispute counts for context
+      var catCounts={};
+      disputeData.forEach(function(t){t.disputes.forEach(function(d){catCounts[d.category]=(catCounts[d.category]||0)+1;});});
+
+      var prompt="You are a QA calibration analyst for Freedom Grooming customer support. Analyze these disputed tickets and return a structured JSON calibration report.\n\n"
+        +"RUBRIC:\n"+matrix.map(function(c){return c.label+": "+c.levels.map(function(l){return l.level+(l.points!==null?" ("+l.points+")":"");}).join("/");}).join("\n")+"\n\n"
+        +"DISPUTED TICKETS ("+disputed.length+" total):\n"+JSON.stringify(disputeData,null,2).slice(0,7000)+"\n\n"
+        +"CATEGORY DISPUTE COUNTS: "+JSON.stringify(catCounts)+"\n\n"
+        +"Return ONLY valid JSON (no markdown, no preamble) matching this exact structure:\n"
+        +'{"summary":{"totalDisputed":0,"alignmentRating":"Good/Fair/Poor","overallAssessment":"2-3 sentence overview"},'
+        +'"categoryAnalysis":[{"category":"","disputeCount":0,"pattern":"over-scoring/under-scoring/inconsistent","finding":"specific observation","recommendation":"specific fix"}],'
+        +'"rubricGaps":[{"category":"","gap":"what is unclear","suggestedCriteria":"improved wording"}],'
+        +'"promptImprovements":[{"category":"","current":"current prompt behavior","suggested":"specific improved instruction"}],'
+        +'"quickWins":[{"title":"","impact":"High/Medium","action":"specific immediate change"}],'
+        +'"agentPatterns":[{"finding":"observation about specific agents or contact reasons","implication":"what it means for QA"}]}';
 
       var result=await callClaudeWithRetry(prompt);
-      setCalibrationResult(result);
+      var clean=result.replace(/```json|```/g,"").trim();
+      var parsed=null;
+      try { parsed=JSON.parse(clean); } catch(e){
+        // fallback: try to extract JSON
+        var m=clean.match(/\{[\s\S]*\}/);
+        if(m) try { parsed=JSON.parse(m[0]); } catch(e2){}
+      }
+      if(!parsed){addToast("Could not parse calibration response — try again","error");setCalibrationRunning(false);return;}
+      setCalibrationResult(parsed);
       addToast("Calibration analysis complete");
     } catch(e){addToast("Calibration failed: "+e.message,"error");}
     setCalibrationRunning(false);
+  }
+
+  function buildCalibrationDocHTML(data) {
+    if(!data) return "";
+    var s=data.summary||{};
+    var alignColor=s.alignmentRating==="Good"?"#166534":s.alignmentRating==="Fair"?"#92400e":"#991b1b";
+    var alignBg=s.alignmentRating==="Good"?"#f0fdf4":s.alignmentRating==="Fair"?"#fffbeb":"#fee2e2";
+
+    function section(title,content){return "<div style=\'margin-bottom:28px;\'><h2 style=\'font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:#6b7280;margin:0 0 12px;\'>" +title+"</h2>"+content+"</div>";}
+    function card(content,border){return "<div style=\'border:1px solid "+(border||"#e5e7eb")+";border-radius:10px;padding:16px 20px;margin-bottom:10px;\'>"+content+"</div>";}
+    function badge(txt,col,bg){return "<span style=\'font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;background:"+bg+";color:"+col+";border:1px solid "+col+"25;\'>"+txt+"</span>";}
+
+    var catHTML=(data.categoryAnalysis||[]).map(function(c){
+      var patternCol=c.pattern==="over-scoring"?"#92400e":c.pattern==="under-scoring"?"#991b1b":"#1d4ed8";
+      var patternBg=c.pattern==="over-scoring"?"#fffbeb":c.pattern==="under-scoring"?"#fee2e2":"#eff6ff";
+      return card(
+        "<div style=\'display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;\'>"
+        +"<span style=\'font-size:13px;font-weight:700;\'>"+c.category+"</span>"
+        +"<div style=\'display:flex;gap:8px;align-items:center;\'>"
+        +badge(c.pattern,patternCol,patternBg)
+        +"<span style=\'font-size:11px;color:#6b7280;\'>"+c.disputeCount+" dispute"+(c.disputeCount!==1?"s":"")+"</span>"
+        +"</div></div>"
+        +"<p style=\'font-size:12px;color:#374151;line-height:1.6;margin:0 0 8px;\'>"+c.finding+"</p>"
+        +"<div style=\'font-size:12px;background:#f9fafb;border-radius:6px;padding:8px 12px;border-left:3px solid #3b82f6;\'>"
+        +"<span style=\'font-weight:600;color:#1d4ed8;\'>Recommendation: </span>"+c.recommendation+"</div>"
+      );
+    }).join("");
+
+    var rubricHTML=(data.rubricGaps||[]).map(function(g){
+      return card(
+        "<div style=\'font-size:13px;font-weight:600;margin-bottom:6px;\'>"+g.category+"</div>"
+        +"<p style=\'font-size:12px;color:#374151;line-height:1.6;margin:0 0 8px;\'><strong>Gap:</strong> "+g.gap+"</p>"
+        +"<div style=\'font-size:12px;background:#f0fdf4;border-radius:6px;padding:8px 12px;border-left:3px solid #16a34a;\'>"
+        +"<span style=\'font-weight:600;color:#166534;\'>Suggested: </span>"+g.suggestedCriteria+"</div>"
+      );
+    }).join("");
+
+    var promptHTML=(data.promptImprovements||[]).map(function(p){
+      return card(
+        "<div style=\'font-size:13px;font-weight:600;margin-bottom:8px;\'>"+p.category+"</div>"
+        +"<div style=\'display:grid;grid-template-columns:1fr 1fr;gap:10px;\'>"
+        +"<div style=\'background:#fee2e2;border-radius:6px;padding:8px 12px;\'><div style=\'font-size:10px;font-weight:700;color:#991b1b;margin-bottom:4px;\'>CURRENT</div><div style=\'font-size:12px;color:#374151;\'>"+p.current+"</div></div>"
+        +"<div style=\'background:#f0fdf4;border-radius:6px;padding:8px 12px;\'><div style=\'font-size:10px;font-weight:700;color:#166534;margin-bottom:4px;\'>SUGGESTED</div><div style=\'font-size:12px;color:#374151;\'>"+p.suggested+"</div></div>"
+        +"</div>"
+      );
+    }).join("");
+
+    var quickHTML=(data.quickWins||[]).map(function(q,i){
+      var impactCol=q.impact==="High"?"#991b1b":q.impact==="Medium"?"#92400e":"#166534";
+      var impactBg=q.impact==="High"?"#fee2e2":q.impact==="Medium"?"#fffbeb":"#f0fdf4";
+      return card(
+        "<div style=\'display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px;\'>"
+        +"<span style=\'font-size:13px;font-weight:700;\'>"+(i+1)+". "+q.title+"</span>"
+        +badge(q.impact+" impact",impactCol,impactBg)
+        +"</div>"
+        +"<p style=\'font-size:12px;color:#374151;line-height:1.6;margin:0;\'>"+q.action+"</p>"
+      );
+    }).join("");
+
+    var agentHTML=(data.agentPatterns||[]).map(function(a){
+      return card(
+        "<p style=\'font-size:12px;color:#374151;line-height:1.6;margin:0 0 6px;\'>"+a.finding+"</p>"
+        +"<p style=\'font-size:12px;color:#6b7280;font-style:italic;margin:0;\'>"+a.implication+"</p>"
+      );
+    }).join("");
+
+    return "<!DOCTYPE html><html><head><meta charset=\'utf-8\'><style>*{box-sizing:border-box;margin:0;padding:0;}body{font-family:Arial,sans-serif;background:white;color:#111827;-webkit-print-color-adjust:exact;}.page{max-width:720px;margin:0 auto;padding:48px 40px 60px;}</style></head><body><div class=\'page\'>"
+      +"<div style=\'padding-bottom:28px;border-bottom:1px solid #e5e7eb;margin-bottom:32px;\'>"
+      +"<div style=\'font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:#6b7280;margin-bottom:6px;\'>Freedom Grooming &middot; QA Calibration Report</div>"
+      +"<h1 style=\'font-size:24px;font-weight:700;margin-bottom:4px;\'>AI Calibration Analysis</h1>"
+      +"<p style=\'font-size:12px;color:#6b7280;margin-bottom:16px;\'>Generated "+new Date().toLocaleDateString("en-US",{month:"long",day:"numeric",year:"numeric"})+" &nbsp;&middot;&nbsp; Based on "+disputed.length+" disputed tickets</p>"
+      +"<div style=\'display:inline-flex;align-items:center;gap:10px;padding:10px 16px;background:"+alignBg+";border-radius:8px;border:1px solid "+alignColor+"40;\'>"
+      +"<span style=\'font-size:11px;font-weight:700;text-transform:uppercase;color:"+alignColor+";\'>Alignment: "+s.alignmentRating+"</span>"
+      +"<span style=\'font-size:12px;color:#374151;\'>"+s.overallAssessment+"</span>"
+      +"</div></div>"
+      +(catHTML?section("Category Analysis",catHTML):"")
+      +(rubricHTML?section("Rubric Gaps",rubricHTML):"")
+      +(promptHTML?section("Prompt Improvements",promptHTML):"")
+      +(quickHTML?section("Quick Wins",quickHTML):"")
+      +(agentHTML?section("Agent & Contact Reason Patterns",agentHTML):"")
+      +"<hr style=\'border:none;border-top:1px solid #e5e7eb;margin:32px 0;\'>"
+      +"<div style=\'font-size:11px;color:#9ca3af;text-align:center;\'>Freedom Grooming QA Calibration &nbsp;&middot;&nbsp; "+new Date().toLocaleDateString()+"</div>"
+      +"</div></body></html>";
   }
 
   async function loadAllData(setup) {
@@ -3099,11 +3203,13 @@ Rules:
             });
             var aiPassRate=filtered.length?Math.round(filtered.filter(function(t){return t.passed;}).length/filtered.length*100):null;
             var dispPassRate=filtered.length?Math.round(filtered.filter(function(t){var _sc=calcDisputedScore(t,matrix);return _sc?(!t.autofail&&_sc.pct>=85):t.passed;}).length/filtered.length*100):null;
+            var avgScore=filtered.length?Math.round(filtered.reduce(function(s,t){var _sc=calcDisputedScore(t,matrix);return s+(_sc?_sc.pct:t.finalScore||t.aiScore||0);},0)/filtered.length):null;
             var stats=[
               {label:"Total QAed",val:tickets.length},
               {label:(dashFrom||dashTo)?"Filtered":"All tickets",val:filtered.length},
               {label:"AI pass rate",val:aiPassRate!==null?aiPassRate+"%":"—",tone:aiPassRate},
               {label:"Final pass rate",val:dispPassRate!==null?dispPassRate+"%":"—",tone:dispPassRate},
+              {label:"Avg score",val:avgScore!==null?avgScore+"%":"—",tone:avgScore},
               {label:"Disputed",val:filtered.filter(function(t){return t.hasDisputes||(t.disputes&&Object.keys(t.disputes).length>0);}).length},
               {label:"Autofails",val:filtered.filter(function(t){return t.autofail||(t.autofails&&t.autofails.length>0);}).length},
             ];
@@ -3653,23 +3759,125 @@ Rules:
               return null;
             })()}
           </div>
-          {calibrationResult&&(
-            <div style={card}>
-              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"14px"}}>
-                <p style={{...sectionLabel,margin:0}}>Calibration recommendations</p>
-                <button onClick={function(){
-                  var blob=new Blob([calibrationResult],{type:"text/plain"});
-                  var url=URL.createObjectURL(blob);
-                  var a=document.createElement("a");a.href=url;a.download="FG_QA_Calibration_"+new Date().toISOString().slice(0,10)+".txt";
-                  document.body.appendChild(a);a.click();document.body.removeChild(a);
-                  setTimeout(function(){URL.revokeObjectURL(url);},1000);
-                }} style={{...ghost,fontSize:"11px"}}>Export as .txt</button>
+          {calibrationResult&&(function(){
+            var s=calibrationResult.summary||{};
+            var alignColor=s.alignmentRating==="Good"?"var(--color-text-success)":s.alignmentRating==="Fair"?"var(--color-text-warning)":"var(--color-text-danger)";
+            var alignBg=s.alignmentRating==="Good"?"var(--color-background-success)":s.alignmentRating==="Fair"?"var(--color-background-warning)":"var(--color-background-danger)";
+            function CatBadge(props){var p=props.pattern;var col=p==="over-scoring"?"var(--color-text-warning)":p==="under-scoring"?"var(--color-text-danger)":"var(--color-text-info)";var bg=p==="over-scoring"?"var(--color-background-warning)":p==="under-scoring"?"var(--color-background-danger)":"var(--color-background-info)";return <span style={{fontSize:"10px",fontWeight:700,padding:"2px 8px",borderRadius:"10px",background:bg,color:col}}>{p}</span>;}
+            return(
+              <div>
+                {/* Header card */}
+                <div style={{...card,marginBottom:"12px"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"12px"}}>
+                    <p style={{...sectionLabel,margin:0}}>Calibration recommendations</p>
+                    <button onClick={function(){
+                      var html=buildCalibrationDocHTML(calibrationResult);
+                      var blob=new Blob([html],{type:"application/msword"});
+                      var url=URL.createObjectURL(blob);
+                      var a=document.createElement("a");a.href=url;a.download="FG_QA_Calibration_"+new Date().toISOString().slice(0,10)+".doc";
+                      document.body.appendChild(a);a.click();document.body.removeChild(a);
+                      setTimeout(function(){URL.revokeObjectURL(url);},1000);
+                    }} style={{...btnInfo,fontSize:"11px"}}>Download report</button>
+                  </div>
+                  <div style={{padding:"12px 16px",background:alignBg,borderRadius:"var(--border-radius-md)",display:"flex",alignItems:"center",gap:"10px"}}>
+                    <span style={{fontSize:"11px",fontWeight:700,textTransform:"uppercase",color:alignColor}}>Alignment: {s.alignmentRating}</span>
+                    <span style={{fontSize:"12px",color:"var(--color-text-secondary)"}}>{s.overallAssessment}</span>
+                  </div>
+                </div>
+
+                {/* Category Analysis */}
+                {(calibrationResult.categoryAnalysis||[]).length>0&&(
+                  <div style={{...card,marginBottom:"12px"}}>
+                    <p style={{...sectionLabel,marginBottom:"12px"}}>Category Analysis</p>
+                    {(calibrationResult.categoryAnalysis||[]).map(function(c,i){
+                      return <div key={i} style={{paddingBottom:"14px",marginBottom:"14px",borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"6px"}}>
+                          <span style={{fontSize:"13px",fontWeight:600}}>{c.category}</span>
+                          <div style={{display:"flex",gap:"8px",alignItems:"center"}}>
+                            <CatBadge pattern={c.pattern}/>
+                            <span style={{fontSize:"11px",color:"var(--color-text-secondary)"}}>{c.disputeCount} dispute{c.disputeCount!==1?"s":""}</span>
+                          </div>
+                        </div>
+                        <p style={{fontSize:"12px",color:"var(--color-text-secondary)",lineHeight:"1.6",marginBottom:"8px"}}>{c.finding}</p>
+                        <div style={{fontSize:"12px",background:"var(--color-background-info)",borderRadius:"var(--border-radius-md)",padding:"8px 12px",borderLeft:"3px solid var(--color-border-info)"}}>
+                          <span style={{fontWeight:600,color:"var(--color-text-info)"}}>Recommendation: </span>{c.recommendation}
+                        </div>
+                      </div>;
+                    })}
+                  </div>
+                )}
+
+                {/* Rubric Gaps */}
+                {(calibrationResult.rubricGaps||[]).length>0&&(
+                  <div style={{...card,marginBottom:"12px"}}>
+                    <p style={{...sectionLabel,marginBottom:"12px"}}>Rubric Gaps</p>
+                    {(calibrationResult.rubricGaps||[]).map(function(g,i){
+                      return <div key={i} style={{paddingBottom:"14px",marginBottom:"14px",borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
+                        <div style={{fontSize:"13px",fontWeight:600,marginBottom:"6px"}}>{g.category}</div>
+                        <p style={{fontSize:"12px",color:"var(--color-text-secondary)",lineHeight:"1.6",marginBottom:"8px"}}><strong>Gap:</strong> {g.gap}</p>
+                        <div style={{fontSize:"12px",background:"var(--color-background-success)",borderRadius:"var(--border-radius-md)",padding:"8px 12px",borderLeft:"3px solid var(--color-border-success)"}}>
+                          <span style={{fontWeight:600,color:"var(--color-text-success)"}}>Suggested: </span>{g.suggestedCriteria}
+                        </div>
+                      </div>;
+                    })}
+                  </div>
+                )}
+
+                {/* Prompt Improvements */}
+                {(calibrationResult.promptImprovements||[]).length>0&&(
+                  <div style={{...card,marginBottom:"12px"}}>
+                    <p style={{...sectionLabel,marginBottom:"12px"}}>Prompt Improvements</p>
+                    {(calibrationResult.promptImprovements||[]).map(function(p,i){
+                      return <div key={i} style={{paddingBottom:"14px",marginBottom:"14px",borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
+                        <div style={{fontSize:"13px",fontWeight:600,marginBottom:"8px"}}>{p.category}</div>
+                        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"8px"}}>
+                          <div style={{background:"var(--color-background-danger)",borderRadius:"var(--border-radius-md)",padding:"8px 12px"}}>
+                            <div style={{fontSize:"10px",fontWeight:700,color:"var(--color-text-danger)",marginBottom:"4px"}}>CURRENT</div>
+                            <div style={{fontSize:"12px",color:"var(--color-text-primary)"}}>{p.current}</div>
+                          </div>
+                          <div style={{background:"var(--color-background-success)",borderRadius:"var(--border-radius-md)",padding:"8px 12px"}}>
+                            <div style={{fontSize:"10px",fontWeight:700,color:"var(--color-text-success)",marginBottom:"4px"}}>SUGGESTED</div>
+                            <div style={{fontSize:"12px",color:"var(--color-text-primary)"}}>{p.suggested}</div>
+                          </div>
+                        </div>
+                      </div>;
+                    })}
+                  </div>
+                )}
+
+                {/* Quick Wins */}
+                {(calibrationResult.quickWins||[]).length>0&&(
+                  <div style={{...card,marginBottom:"12px"}}>
+                    <p style={{...sectionLabel,marginBottom:"12px"}}>Quick Wins</p>
+                    {(calibrationResult.quickWins||[]).map(function(q,i){
+                      var impactCol=q.impact==="High"?"var(--color-text-danger)":q.impact==="Medium"?"var(--color-text-warning)":"var(--color-text-success)";
+                      var impactBg=q.impact==="High"?"var(--color-background-danger)":q.impact==="Medium"?"var(--color-background-warning)":"var(--color-background-success)";
+                      return <div key={i} style={{paddingBottom:"12px",marginBottom:"12px",borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
+                        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"6px"}}>
+                          <span style={{fontSize:"13px",fontWeight:600}}>{i+1}. {q.title}</span>
+                          <span style={{fontSize:"10px",fontWeight:700,padding:"2px 8px",borderRadius:"10px",background:impactBg,color:impactCol}}>{q.impact} impact</span>
+                        </div>
+                        <p style={{fontSize:"12px",color:"var(--color-text-secondary)",lineHeight:"1.6",margin:0}}>{q.action}</p>
+                      </div>;
+                    })}
+                  </div>
+                )}
+
+                {/* Agent Patterns */}
+                {(calibrationResult.agentPatterns||[]).length>0&&(
+                  <div style={card}>
+                    <p style={{...sectionLabel,marginBottom:"12px"}}>Agent & Contact Reason Patterns</p>
+                    {(calibrationResult.agentPatterns||[]).map(function(a,i){
+                      return <div key={i} style={{paddingBottom:"12px",marginBottom:"12px",borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
+                        <p style={{fontSize:"12px",color:"var(--color-text-primary)",lineHeight:"1.6",marginBottom:"4px"}}>{a.finding}</p>
+                        <p style={{fontSize:"12px",color:"var(--color-text-secondary)",fontStyle:"italic",margin:0}}>{a.implication}</p>
+                      </div>;
+                    })}
+                  </div>
+                )}
               </div>
-              <div style={{fontSize:"13px",color:"var(--color-text-primary)",lineHeight:"1.8",whiteSpace:"pre-wrap"}}>
-                {calibrationResult}
-              </div>
-            </div>
-          )}
+            );
+          })()}
         </div>
       )}
 
