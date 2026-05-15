@@ -2,8 +2,14 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  1.7.4
+  Version:  1.7.5
   Date:     2026-05-12
+
+  Changelog:
+  v1.7.5 (2026-05-12)
+    - Fix: Score color thresholds now align with pass threshold (green ≥85%, amber ≥70%, red <70%)
+    - Previously green required ≥90% causing passing scores like 86-89% to show as amber
+    - Applied to scoreTone, scoreColor, and all inline sc() functions in reports
 
   Changelog:
   v1.7.4 (2026-05-12)
@@ -221,7 +227,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v1.7.4";
+const APP_VERSION = "v1.7.5";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
 const CONFIG_DB_ID = "3574e96c994180c08a40f31e89db80ce";
@@ -802,10 +808,10 @@ function formatNotes(justifications, catId) {
   return out.slice(0, 1990);
 }
 
-function scoreTone(pct) { return pct >= 90 ? T.green : pct >= 75 ? T.amber : T.red; }
+function scoreTone(pct) { return pct >= 85 ? T.green : pct >= 70 ? T.amber : T.red; }
 function scoreColor(pct) {
-  if (pct >= 90) return T.green.text;
-  if (pct >= 75) return T.amber.text;
+  if (pct >= 85) return T.green.text;
+  if (pct >= 70) return T.amber.text;
   return T.red.text;
 }
 function resultBadge(t) {
@@ -1235,7 +1241,7 @@ function App() {
     var dateLabel = fromVal && toVal ? fromVal+" - "+toVal : fromVal ? "From "+fromVal : toVal ? "Up to "+toVal : (agentTickets[agentTickets.length-1]&&agentTickets[agentTickets.length-1].week)||"All time";
     var firstName = agentName.split(" ")[0];
 
-    function sc(pct){if(pct>=90)return{t:"#166534",bg:"#f0fdf4",b:"#bbf7d0"};if(pct>=75)return{t:"#92400e",bg:"#fffbeb",b:"#fde68a"};return{t:"#991b1b",bg:"#fee2e2",b:"#fecaca"};}
+    function sc(pct){if(pct>=85)return{t:"#166534",bg:"#f0fdf4",b:"#bbf7d0"};if(pct>=70)return{t:"#92400e",bg:"#fffbeb",b:"#fde68a"};return{t:"#991b1b",bg:"#fee2e2",b:"#fecaca"};}
     function badge(lbl){if(lbl==="Pass")return "background:#e6f4ec;color:#166534;border:1px solid #bbf7d0;";if(lbl==="Partial")return "background:#fef9c3;color:#854d0e;border:1px solid #fde68a;";if(lbl==="Miss")return "background:#fee2e2;color:#991b1b;border:1px solid #fecaca;";return "background:#f3f4f6;color:#6b7280;border:1px solid #e5e7eb;";}
     function catLbl(val){if(!val||val==="NA")return null;var v=val.toUpperCase();if(v.startsWith("YES"))return "Pass";if(v.startsWith("PARTIAL"))return "Partial";if(v.startsWith("NO"))return "Miss";return null;}
 
@@ -1494,7 +1500,7 @@ function App() {
     var totalDisputed=filtered.filter(function(t){return t.hasDisputes||(t.disputes&&Object.keys(t.disputes).length>0);}).length;
     var teamAvg=Math.round(filtered.reduce(function(s,t){return s+t.finalScore;},0)/totalTickets);
 
-    function sc(pct){if(pct>=90)return{t:"#166534",bg:"#f0fdf4",b:"#bbf7d0"};if(pct>=75)return{t:"#92400e",bg:"#fffbeb",b:"#fde68a"};return{t:"#991b1b",bg:"#fee2e2",b:"#fecaca"};}
+    function sc(pct){if(pct>=85)return{t:"#166534",bg:"#f0fdf4",b:"#bbf7d0"};if(pct>=70)return{t:"#92400e",bg:"#fffbeb",b:"#fde68a"};return{t:"#991b1b",bg:"#fee2e2",b:"#fecaca"};}
     function catLbl(val){if(!val||val==="NA")return null;var v=val.toUpperCase();if(v.startsWith("YES"))return "Pass";if(v.startsWith("PARTIAL"))return "Partial";if(v.startsWith("NO"))return "Miss";return null;}
 
     var tone=sc(teamAvg);
