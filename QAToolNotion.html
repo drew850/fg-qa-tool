@@ -2,8 +2,16 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  1.8.0
+  Version:  1.8.1
   Date:     2026-05-12
+
+  Changelog:
+  v1.8.1 (2026-05-12)
+    - Feature: View users filtered to their own tickets (by agentName mapping)
+    - Settings: Agent Name dropdown per user (replaces multi-select agents)
+    - USERS pre-filled with all 29 agent email mappings
+    - viewAgentFilter applied at load time — affects Dashboard, Review, Reports
+    - Settings saves agentName to Notion user config
 
   Changelog:
   v1.8.0 (2026-05-12)
@@ -239,7 +247,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v1.8.0";
+const APP_VERSION = "v1.8.1";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
 const CONFIG_DB_ID = "3574e96c994180c08a40f31e89db80ce";
@@ -249,11 +257,40 @@ const PASS_THRESHOLD = 85;
 
 // Role: "full" = all access, "edit" = can QA + dispute, "view" = read-only
 const USERS = {
-  "drew@myfreebird.com":        { name: "Drew",    role: "full" },
-  "naomi@myfreebird.com":       { name: "Naomi O.", role: "edit" },
-  "jean@myfreebird.com":        { name: "Jean",    role: "edit" },
-  "jero@myfreebird.com":        { name: "Jero M.", role: "edit" },
-  "john.marco@myfreebird.com":  { name: "Marco O.", role: "edit" },
+  "drew@myfreebird.com":               { name: "Drew",          role: "full",  agentName: "" },
+  "naomi@myfreebird.com":              { name: "Naomi",         role: "edit",  agentName: "" },
+  "jean@myfreebird.com":               { name: "Jean",          role: "edit",  agentName: "Jean T." },
+  "jero@myfreebird.com":               { name: "Jero",          role: "edit",  agentName: "" },
+  "john.marco@myfreebird.com":         { name: "John Marco",    role: "edit",  agentName: "Marco O." },
+  "anna@myfreebird.com":               { name: "Anna",          role: "view",  agentName: "Anna" },
+  "anthony@myfreebird.com":            { name: "Anthony M",     role: "view",  agentName: "Anthony M" },
+  "arvin@myfreebird.com":              { name: "Arvin R",       role: "view",  agentName: "Arvin R" },
+  "cristineann@myfreebird.com":        { name: "Cristine T.",   role: "view",  agentName: "Cristine T." },
+  "daniel@myfreebird.com":             { name: "Daniel F",      role: "view",  agentName: "Daniel F" },
+  "djac@myfreebird.com":               { name: "Djac D.G.",     role: "view",  agentName: "Djac D.G." },
+  "edward@myfreebird.com":             { name: "Edward A",      role: "view",  agentName: "Edward A" },
+  "geal@myfreebird.com":               { name: "Geal Ann L.",   role: "view",  agentName: "Geal Ann L." },
+  "gerry@myfreebird.com":              { name: "Gerry P.",      role: "view",  agentName: "Gerry P." },
+  "hans@myfreebird.com":               { name: "Hans G.",       role: "view",  agentName: "Hans G." },
+  "jan@myfreebird.com":                { name: "Jan C.",        role: "view",  agentName: "Jan C." },
+  "jann@myfreebird.com":               { name: "Jann G.",       role: "view",  agentName: "Jann G." },
+  "jennifer@myfreebird.com":           { name: "Jenn S",        role: "view",  agentName: "Jenn S" },
+  "joanna@myfreebird.com":             { name: "Joanna L",      role: "view",  agentName: "Joanna L" },
+  "julius@myfreebird.com":             { name: "Julius T.",     role: "view",  agentName: "Julius T." },
+  "karl@myfreebird.com":               { name: "Karl L.",       role: "view",  agentName: "Karl L." },
+  "keo@myfreebird.com":                { name: "Keo H.",        role: "view",  agentName: "Keo H." },
+  "khate@myfreebird.com":              { name: "Khate P",       role: "view",  agentName: "Khate P" },
+  "kristianne@myfreebird.com":         { name: "Kristianne M.", role: "view",  agentName: "Kristianne M." },
+  "kristine.mina@freedom-grooming.com":{ name: "Kristine D.V.", role: "view",  agentName: "Kristine D.V." },
+  "macy@myfreebird.com":               { name: "Macy F.",       role: "view",  agentName: "Macy F." },
+  "maria@myfreebird.com":              { name: "Maria C.",      role: "view",  agentName: "Maria C." },
+  "mariel@myfreebird.com":             { name: "Mariel C",      role: "view",  agentName: "Mariel C" },
+  "merrymay.lu@freedom-grooming.com":  { name: "May L.",        role: "view",  agentName: "May L." },
+  "miguel.rosa@myfreebird.com":        { name: "Miguel D",      role: "view",  agentName: "Miguel D" },
+  "milton@myfreebird.com":             { name: "Milton R.",     role: "view",  agentName: "Milton R." },
+  "nicole@freedom-grooming.com":       { name: "Nicole G.",     role: "view",  agentName: "Nicole G." },
+  "sonia@freedom-grooming.com":        { name: "Sonia C.",      role: "view",  agentName: "Sonia C." },
+  "vincent@myfreebird.com":            { name: "Vincent B.",    role: "view",  agentName: "Vincent B." },
 };
 
 
@@ -942,14 +979,15 @@ function App() {
     console.log("[QA] user found:", user);
     if(user){
       console.log("[QA] setting currentUser:", {email:em,...user});
-      setCurrentUser({email:em,...user});
+      setCurrentUser({email:em,...user,agentName:user.agentName||""});
       setLoginError("");
+      var setup1=Object.assign({},HARDCODED_SETUP,{_agentFilter:user.agentName||""});
       setNotionSetup(HARDCODED_SETUP);
       setLoading(true);
-      loadAllData(HARDCODED_SETUP);
+      loadAllData(setup1);
     } else if(em){
       console.log("[QA] guest login");
-      setCurrentUser({email:em,name:"Guest",role:"view"});
+      setCurrentUser({email:em,name:"Guest",role:"view",agentName:""});
       setLoginError("");
       setNotionSetup(HARDCODED_SETUP);
       setLoading(true);
@@ -996,12 +1034,14 @@ function App() {
       var user=liveUser||hardUser;
       var role=user?user.role:"view";
       var name=user?user.name:(session.name||em.split("@")[0]);
+      var agentName=user?(user.agentName||""):"";
       sessionStorage.setItem("qa_session",token);
       setSessionToken(token);
-      setCurrentUser({email:em,name:name,role:role});
+      setCurrentUser({email:em,name:name,role:role,agentName:agentName});
+      var setup2=Object.assign({},HARDCODED_SETUP,{_agentFilter:agentName});
       setNotionSetup(HARDCODED_SETUP);
       setLoading(true);
-      loadAllData(HARDCODED_SETUP);
+      loadAllData(setup2);
     } else {
       sessionStorage.removeItem("qa_session");
       setSessionToken("");
@@ -1039,8 +1079,11 @@ function App() {
   // Derived from logged-in user (safe to read even when null)
   var isFullAccess = currentUser&&currentUser.role==="full";
   var isEditor     = currentUser&&(currentUser.role==="full"||currentUser.role==="edit");
+  var isViewOnly   = currentUser&&currentUser.role==="view";
   var activeAuditor= currentUser?currentUser.name:"";
   var disputerName = currentUser?currentUser.name:"";
+  // For View users with an agentName — filter tickets to their own only
+  var viewAgentFilter = isViewOnly&&currentUser.agentName?currentUser.agentName:"";
 
   // Review tab state
 
@@ -2054,7 +2097,7 @@ Rules:
   // Seed from hardcoded USERS if Notion has none yet
   function hardcodedUsersArray() {
     return Object.entries(USERS).map(function(e){
-      return {email:e[0],name:e[1].name,role:e[1].role,assignedAgents:[]};
+      return {email:e[0],name:e[1].name,role:e[1].role,agentName:e[1].agentName||"",assignedAgents:[]};
     });
   }
 
@@ -2310,6 +2353,11 @@ Rules:
       const t = await loadTicketsFromNotion(setup.ticketsDbId, setSyncStatus);
       // Filter out soft-deleted tickets from all views
       var activeTickets = Array.isArray(t) ? t.filter(function(tk){return !tk.deleted;}) : [];
+      // For View users with an agent name — filter to their own tickets only
+      var agentFilter = setup._agentFilter||"";
+      if(agentFilter){
+        activeTickets = activeTickets.filter(function(tk){return tk.agentName===agentFilter;});
+      }
       setTickets(activeTickets);
       setSyncStatus("Loading users...");
       await loadUsersFromNotion(setup.configDbId);
@@ -4055,8 +4103,8 @@ Rules:
                     </div>
                     <div style={{border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-lg)",overflow:"hidden"}}>
                       {/* Table header */}
-                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 100px 80px",gap:"0",padding:"8px 14px",background:"var(--color-background-secondary)",borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
-                        {["Name / Email","Agents","Role",""].map(function(h,i){return <span key={i} style={{fontSize:"10px",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.07em",color:"var(--color-text-secondary)"}}>{h}</span>;})}
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 140px 100px 80px",gap:"0",padding:"8px 14px",background:"var(--color-background-secondary)",borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
+                        {["Name / Email","Agent Name","Role",""].map(function(h,i){return <span key={i} style={{fontSize:"10px",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.07em",color:"var(--color-text-secondary)"}}>{h}</span>;})}
                       </div>
                       {/* Rows */}
                       {userList.length===0&&(
@@ -4066,7 +4114,7 @@ Rules:
                         var initials=u.name.split(" ").map(function(w){return w[0];}).join("").slice(0,2).toUpperCase();
                         var isCurrentUser=currentUser&&u.email===currentUser.email;
                         return(
-                          <div key={u.email} style={{display:"grid",gridTemplateColumns:"1fr 1fr 100px 80px",gap:"0",padding:"12px 14px",borderBottom:idx<userList.length-1?"0.5px solid var(--color-border-tertiary)":"none",alignItems:"center",background:isCurrentUser?"var(--color-background-info)":"transparent"}}>
+                          <div key={u.email} style={{display:"grid",gridTemplateColumns:"1fr 140px 100px 80px",gap:"0",padding:"12px 14px",borderBottom:idx<userList.length-1?"0.5px solid var(--color-border-tertiary)":"none",alignItems:"center",background:isCurrentUser?"var(--color-background-info)":"transparent"}}>
                             {/* Name + email */}
                             <div style={{display:"flex",alignItems:"center",gap:"10px"}}>
                               <div style={{width:"30px",height:"30px",borderRadius:"50%",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"11px",fontWeight:700,color:"var(--color-text-secondary)",flexShrink:0}}>
@@ -4077,25 +4125,19 @@ Rules:
                                 <div style={{fontSize:"11px",color:"var(--color-text-secondary)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{u.email}</div>
                               </div>
                             </div>
-                            {/* Assigned agents */}
+                            {/* Agent Name — for view-only filtering */}
                             <div style={{fontSize:"12px",color:"var(--color-text-secondary)",paddingRight:"8px"}}>
                               {isFullAccess?(
-                                <div>
-                                  <select
-                                    multiple
-                                    value={u.assignedAgents||[]}
-                                    onChange={function(e){
-                                      var selected=Array.from(e.target.selectedOptions).map(function(o){return o.value;});
-                                      updateUserField(u.email,"assignedAgents",selected);
-                                    }}
-                                    style={{width:"100%",fontSize:"11px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"4px",padding:"2px",minHeight:"36px",maxHeight:"60px"}}
-                                  >
-                                    {agents.map(function(a){return <option key={a} value={a}>{a}</option>;})}
-                                  </select>
-                                  {(!agents||agents.length===0)&&<span style={{fontSize:"11px",color:"var(--color-text-secondary)",fontStyle:"italic"}}>No agents yet</span>}
-                                </div>
+                                <select
+                                  value={u.agentName||""}
+                                  onChange={function(e){updateUserField(u.email,"agentName",e.target.value);}}
+                                  style={{width:"100%",fontSize:"11px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"4px",padding:"4px 4px"}}
+                                >
+                                  <option value="">— none —</option>
+                                  {AGENT_LIST.map(function(a){return <option key={a} value={a}>{a}</option>;})}
+                                </select>
                               ):(
-                                <span>{(u.assignedAgents&&u.assignedAgents.length>0)?u.assignedAgents.join(", "):"—"}</span>
+                                <span style={{fontSize:"11px"}}>{u.agentName||"—"}</span>
                               )}
                             </div>
                             {/* Role */}
