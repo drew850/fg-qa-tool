@@ -2,8 +2,14 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.0
+  Version:  2.0.1
   Date:     2026-05-19
+
+  Changelog:
+  v2.0.1 (2026-05-19)
+    - Fix: 429 retry now correctly detects rate limit via _status field
+    - Fix: gorgiasAPI returns {_status:429} instead of throwing on rate limit
+    - Fix: Delay between ticket message fetches increased to 500ms
 
   Changelog:
   v2.0.0 (2026-05-19)
@@ -314,7 +320,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.0";
+const APP_VERSION = "v2.0.1";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
 const CONFIG_DB_ID = "3574e96c994180c08a40f31e89db80ce";
@@ -2254,6 +2260,7 @@ Rules:
       headers: {"Content-Type":"application/json"},
       body: JSON.stringify({endpoint: endpoint, params: params||{}, method: method||"GET"})
     });
+    if(resp.status === 429) return {_status: 429};
     if(!resp.ok) throw new Error("Gorgias API error: "+resp.status);
     return resp.json();
   }
@@ -2397,9 +2404,9 @@ Rules:
         for(var attempt=0; attempt<5; attempt++) {
           try {
             var msgResp = await gorgiasAPI("/tickets/"+tid+"/messages", {limit:100});
-            if(msgResp.error && String(msgResp.error).includes("429")) {
+            if(msgResp._status === 429) {
               var wait = [5000,10000,20000,40000,60000][attempt];
-              setFetchStatus("Rate limited — waiting "+(wait/1000)+"s...");
+              setFetchStatus("Rate limited — waiting "+(wait/1000)+"s before retry "+(attempt+1)+"/5...");
               await new Promise(function(r){setTimeout(r,wait);});
               continue;
             }
@@ -2465,7 +2472,7 @@ Rules:
         }
 
         // Small delay to avoid rate limiting
-        await new Promise(function(r){setTimeout(r,300);});
+        await new Promise(function(r){setTimeout(r,500);});
       }
 
       setFetchedTickets(results);
