@@ -2,8 +2,18 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  1.8.1
+  Version:  1.8.2
   Date:     2026-05-12
+
+  Changelog:
+  v1.8.2 (2026-05-12)
+    - Feature: Agent (View) users can dispute their own ticket scores
+    - Agent disputes saved as status: pending — no score change until approved
+    - Edit+ users see Approve/Reject controls per category on pending disputes
+    - Rejection shows reason to agent as a badge on their ticket
+    - Review tab: Pending agent disputes filter for auditors
+    - Review tab list: ⏳ badge on tickets with pending agent disputes
+    - One dispute per category per ticket enforced
 
   Changelog:
   v1.8.1 (2026-05-12)
@@ -247,7 +257,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v1.8.1";
+const APP_VERSION = "v1.8.2";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
 const CONFIG_DB_ID = "3574e96c994180c08a40f31e89db80ce";
@@ -962,6 +972,10 @@ function App() {
   const [reopenPrompt,setReopenPrompt]=useState(false);
   const [reopenReason,setReopenReason]=useState("");
   const [savingReopen,setSavingReopen]=useState(false);
+  // Agent dispute approval
+  const [approvalState,setApprovalState]=useState({}); // {catId: {action:"approve"|"reject", reason:""}}
+  const [savingApproval,setSavingApproval]=useState(false);
+  const [reviewFilter,setReviewFilter]=useState("all"); // "all"|"pending_disputes"|"reviewed"|"not_reviewed"
   const [settingsTab,setSettingsTab]=useState("access");
   const [userList,setUserList]=useState([]);
   const [userListDirty,setUserListDirty]=useState(false);
@@ -2406,6 +2420,107 @@ Rules:
   function updateCatField(id,field,val){setMatrix(function(m){return m.map(function(c){return c.id===id?Object.assign({},c,{[field]:val}):c;});});}
   function updateLevelField(id,idx,field,val){setMatrix(function(m){return m.map(function(c){return c.id===id?Object.assign({},c,{levels:c.levels.map(function(l,i){return i===idx?Object.assign({},l,{[field]:val}):l;})}):c;});});}
 
+  // ── AGENT DISPUTE (View users) ────────────────────────────────────────────────
+  async function saveAgentDispute() {
+    if(!reviewSelected||!currentUser){return;}
+    var pending=Object.entries(disputeState).filter(function(e){
+      var d=e[1];return d.newScore&&d.justification&&d.justification.trim();
+    });
+    if(!pending.length){addToast("No disputes to submit","error");return;}
+    setSavingDispute(true);
+    try {
+      var updatedDisputes=Object.assign({},reviewSelected.disputes||{});
+      pending.forEach(function(e){
+        var catId=e[0],d=e[1];
+        // Only allow one dispute per category — skip if already exists
+        if(!updatedDisputes[catId]){
+          updatedDisputes[catId]={
+            finalScore:d.newScore,
+            justification:d.justification.trim(),
+            disputer:currentUser.name,
+            disputedAt:new Date().toISOString(),
+            status:"pending",  // pending | approved | rejected
+            rejectedReason:"",
+            decidedBy:"",
+            decidedAt:"",
+          };
+        }
+      });
+      var hasDisputes=Object.keys(updatedDisputes).length>0;
+      var disputesStr=JSON.stringify(updatedDisputes).slice(0,1990);
+      if(reviewSelected.notionPageId){
+        await notionAPI("/v1/pages/"+reviewSelected.notionPageId,"PATCH",{properties:{
+          "Disputes JSON":{rich_text:[{text:{content:disputesStr}}]},
+          "Has Disputes":  {checkbox:hasDisputes},
+        }});
+      }
+      var updated=Object.assign({},reviewSelected,{disputes:updatedDisputes,hasDisputes});
+      setTickets(function(ts){return ts.map(function(t){return t.id===updated.id?updated:t;});});
+      setReviewSelected(updated);
+      setDisputeState({});
+      addToast("Dispute submitted — pending auditor review");
+    } catch(e){addToast("Submit failed: "+e.message,"error");}
+    setSavingDispute(false);
+  }
+
+  // ── DISPUTE APPROVAL (Edit+ users) ───────────────────────────────────────────
+  async function saveDisputeApproval() {
+    if(!reviewSelected||!isEditor)return;
+    var decisions=Object.entries(approvalState).filter(function(e){return e[1].action;});
+    if(!decisions.length){addToast("No decisions to save","error");return;}
+    setSavingApproval(true);
+    try {
+      var updatedDisputes=Object.assign({},reviewSelected.disputes||{});
+      var now=new Date().toISOString();
+      decisions.forEach(function(e){
+        var catId=e[0],dec=e[1];
+        if(!updatedDisputes[catId])return;
+        if(dec.action==="approve"){
+          updatedDisputes[catId]=Object.assign({},updatedDisputes[catId],{
+            status:"approved",decidedBy:currentUser.name,decidedAt:now,rejectedReason:""
+          });
+        } else {
+          updatedDisputes[catId]=Object.assign({},updatedDisputes[catId],{
+            status:"rejected",decidedBy:currentUser.name,decidedAt:now,
+            rejectedReason:(dec.reason||"").trim(),
+            // Revert score back to AI score on rejection
+            finalScore:(reviewSelected.aiScores&&reviewSelected.aiScores[catId])||"",
+          });
+        }
+      });
+      // Recalculate final score using only approved disputes
+      var merged={};
+      matrix.forEach(function(c){
+        var disp=updatedDisputes[c.id];
+        var useDisp=disp&&disp.status==="approved";
+        merged[c.id]=useDisp?disp.finalScore:((reviewSelected.aiScores&&reviewSelected.aiScores[c.id])||"");
+      });
+      var dispSc=calcScore(merged,matrix);
+      var hasDisputes=Object.values(updatedDisputes).some(function(d){return d.status==="approved";});
+      var disputesStr=JSON.stringify(updatedDisputes).slice(0,1990);
+      var updated=Object.assign({},reviewSelected,{
+        disputes:updatedDisputes,hasDisputes,
+        finalScore:dispSc?dispSc.pct:reviewSelected.finalScore,
+        reviewed:true,reviewedBy:currentUser.name,reviewedAt:now,
+      });
+      if(reviewSelected.notionPageId){
+        await updateTicketInNotion(reviewSelected.notionPageId,updated);
+        await notionAPI("/v1/pages/"+reviewSelected.notionPageId,"PATCH",{properties:{
+          "Disputes JSON":{rich_text:[{text:{content:disputesStr}}]},
+          "Has Disputes":  {checkbox:hasDisputes},
+          "Reviewed":      {checkbox:true},
+          "Reviewed By":   {rich_text:[{text:{content:currentUser.name}}]},
+          "Reviewed At":   {rich_text:[{text:{content:now}}]},
+        }});
+      }
+      setTickets(function(ts){return ts.map(function(t){return t.id===updated.id?updated:t;});});
+      setReviewSelected(updated);
+      setApprovalState({});
+      addToast("Dispute decisions saved");
+    } catch(e){addToast("Save failed: "+e.message,"error");}
+    setSavingApproval(false);
+  }
+
   async function saveDispute() {
     if(!reviewSelected||!disputerName.trim()){addToast("Select your name first","error");return;}
     var pending=Object.entries(disputeState).filter(function(e){
@@ -2833,6 +2948,7 @@ Rules:
                       <option value="all">All</option>
                       <option value="reviewed">Reviewed</option>
                       <option value="pending">Not reviewed yet</option>
+                      {isEditor&&<option value="pending_disputes">Pending agent disputes</option>}
                     </select>
                   </div>
                   <button onClick={function(){setReviewFilters({week:"",agent:"",auditor:"",disputedOnly:false,reviewStatus:"all"});}} style={ghost}>Reset</button>
@@ -2849,6 +2965,10 @@ Rules:
                   var isReviewed=reviewedTickets[t.id||t.ticketId]||t.reviewed;
                   if(reviewFilters.reviewStatus==="reviewed"&&!isReviewed)return false;
                   if(reviewFilters.reviewStatus==="pending"&&isReviewed)return false;
+                  if(reviewFilters.reviewStatus==="pending_disputes"){
+                    var hasPending=t.disputes&&Object.values(t.disputes).some(function(d){return d.status==="pending";});
+                    if(!hasPending)return false;
+                  }
                   return true;
                 }).slice().reverse();
                 if(!filtered.length)return <div style={{...card,textAlign:"center",padding:"3rem",color:"var(--color-text-secondary)"}}>No tickets match your filters.</div>;
@@ -2959,8 +3079,11 @@ Rules:
               {/* Category scores */}
               <div style={card}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"12px"}}>
-                  <p style={{margin:0,fontWeight:500,fontSize:"14px"}}>{isEditor?"Scores — click any category to dispute":"Scores"}</p>
+                  <p style={{margin:0,fontWeight:500,fontSize:"14px"}}>
+                    {isEditor?"Scores — click any category to dispute":isViewOnly?"Scores — click to dispute your ticket":"Scores"}
+                  </p>
                   {isEditor&&<span style={{fontSize:"12px",color:"var(--color-text-secondary)"}}>Disputing as <strong>{currentUser.name}</strong></span>}
+                  {isViewOnly&&<span style={{fontSize:"12px",color:"var(--color-text-secondary)"}}>Disputes require auditor approval</span>}
                 </div>
                 {(!reviewSelected.aiScores||Object.keys(reviewSelected.aiScores).length===0)&&(
                   <div style={{padding:"10px 14px",background:"var(--color-background-warning)",border:"0.5px solid var(--color-border-warning)",borderRadius:"var(--border-radius-md)",marginBottom:"12px",fontSize:"12px",color:"var(--color-text-warning)"}}>
@@ -2994,6 +3117,7 @@ Rules:
                               <ScorePill label={finalLbl}/>
                             </div>
                           </React.Fragment>}
+                          {/* Dispute button — Editor: full dispute; View: submit for approval */}
                           {!isEditing&&isEditor&&<button onClick={function(){setDisputeState(function(s){
                                   var prev=s[c.id]||{};
                                   var defJust=existingDispute?existingDispute.justification:"";
@@ -3001,15 +3125,69 @@ Rules:
                                 });}} style={{...ghost,fontSize:"11px",padding:"3px 10px"}}>
                             {isDisputed||hasChange?"Edit":"Dispute"}
                           </button>}
-                          {(isDisputed||hasChange)&&!isEditing&&<button onClick={function(){setDisputeState(function(s){var n=Object.assign({},s);if(existingDispute){n[c.id]={removed:true};}else{delete n[c.id];}return n;});}} style={{fontSize:"11px",padding:"3px 8px",background:"none",border:"none",cursor:"pointer",color:"var(--color-text-danger)"}}>Remove</button>}
+                          {/* Agent View: show Dispute button only if no existing dispute for this category */}
+                          {!isEditing&&isViewOnly&&!existingDispute&&!ds.editing&&<button onClick={function(){setDisputeState(function(s){
+                                  return Object.assign({},s,{[c.id]:{editing:true,newScore:currentFinal,justification:""}});
+                                });}} style={{...ghost,fontSize:"11px",padding:"3px 10px"}}>Dispute</button>}
+                          {/* Agent: show pending badge if dispute submitted */}
+                          {isViewOnly&&existingDispute&&existingDispute.status==="pending"&&<span style={{fontSize:"10px",fontWeight:700,padding:"2px 7px",borderRadius:"10px",background:"var(--color-background-warning)",color:"var(--color-text-warning)",border:"0.5px solid var(--color-border-warning)"}}>⏳ Pending</span>}
+                          {/* Agent: show approved badge */}
+                          {isViewOnly&&existingDispute&&existingDispute.status==="approved"&&<span style={{fontSize:"10px",fontWeight:700,padding:"2px 7px",borderRadius:"10px",background:"var(--color-background-success)",color:"var(--color-text-success)",border:"0.5px solid var(--color-border-success)"}}>✓ Approved</span>}
+                          {/* Agent: show rejected badge */}
+                          {isViewOnly&&existingDispute&&existingDispute.status==="rejected"&&<span style={{fontSize:"10px",fontWeight:700,padding:"2px 7px",borderRadius:"10px",background:"var(--color-background-danger)",color:"var(--color-text-danger)",border:"0.5px solid var(--color-border-danger)"}}>✗ Rejected</span>}
+                          {(isDisputed||hasChange)&&!isEditing&&isEditor&&<button onClick={function(){setDisputeState(function(s){var n=Object.assign({},s);if(existingDispute){n[c.id]={removed:true};}else{delete n[c.id];}return n;});}} style={{fontSize:"11px",padding:"3px 8px",background:"none",border:"none",cursor:"pointer",color:"var(--color-text-danger)"}}>Remove</button>}
                         </div>
                       </div>
 
-                      {/* Existing dispute info */}
-                      {isDisputed&&!isEditing&&<div style={{marginTop:"8px",fontSize:"12px",color:"var(--color-text-warning)",lineHeight:"1.6"}}>
-                        <span style={{fontWeight:500}}>Disputed by {existingDispute.disputer}</span> · {existingDispute.disputedAt?new Date(existingDispute.disputedAt).toLocaleDateString():""}
-                        <div style={{color:"var(--color-text-secondary)",marginTop:"2px"}}>{existingDispute.justification}</div>
-                      </div>}
+                      {/* Existing dispute info + approval UI */}
+                      {isDisputed&&!isEditing&&(function(){
+                        var dStatus=existingDispute.status||"approved"; // legacy disputes without status = approved
+                        var isPending=dStatus==="pending";
+                        var isRejected=dStatus==="rejected";
+                        var dispColor=isPending?"var(--color-text-warning)":isRejected?"var(--color-text-danger)":"var(--color-text-warning)";
+                        var appState=approvalState[c.id]||{};
+                        return(
+                          <div style={{marginTop:"8px"}}>
+                            <div style={{fontSize:"12px",color:dispColor,lineHeight:"1.6"}}>
+                              <span style={{fontWeight:500}}>Disputed by {existingDispute.disputer}</span>
+                              {existingDispute.disputedAt&&<span style={{color:"var(--color-text-secondary)"}}> · {new Date(existingDispute.disputedAt).toLocaleDateString()}</span>}
+                              {isPending&&<span style={{marginLeft:"6px",fontSize:"10px",fontWeight:700,padding:"1px 6px",borderRadius:"10px",background:"var(--color-background-warning)",color:"var(--color-text-warning)",border:"0.5px solid var(--color-border-warning)"}}>Pending approval</span>}
+                              {isRejected&&<span style={{marginLeft:"6px",fontSize:"10px",fontWeight:700,padding:"1px 6px",borderRadius:"10px",background:"var(--color-background-danger)",color:"var(--color-text-danger)",border:"0.5px solid var(--color-border-danger)"}}>Rejected</span>}
+                            </div>
+                            <div style={{fontSize:"12px",color:"var(--color-text-secondary)",marginTop:"2px"}}>{existingDispute.justification}</div>
+                            {/* Show rejection reason to agent */}
+                            {isRejected&&existingDispute.rejectedReason&&(
+                              <div style={{marginTop:"6px",padding:"6px 10px",background:"var(--color-background-danger)",borderRadius:"var(--border-radius-md)",fontSize:"12px",color:"var(--color-text-danger)"}}>
+                                <strong>Reason: </strong>{existingDispute.rejectedReason}
+                                {existingDispute.decidedBy&&<span style={{color:"var(--color-text-secondary)"}}> — {existingDispute.decidedBy}</span>}
+                              </div>
+                            )}
+                            {/* Approval UI for Edit+ users on pending disputes */}
+                            {isEditor&&isPending&&(
+                              <div style={{marginTop:"8px",padding:"10px 12px",background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)",border:"0.5px solid var(--color-border-secondary)"}}>
+                                <div style={{fontSize:"11px",fontWeight:600,color:"var(--color-text-secondary)",marginBottom:"8px",textTransform:"uppercase",letterSpacing:"0.07em"}}>Auditor decision</div>
+                                <div style={{display:"flex",gap:"8px",marginBottom:"8px"}}>
+                                  <button onClick={function(){setApprovalState(function(a){return Object.assign({},a,{[c.id]:Object.assign({},a[c.id]||{},{action:"approve"})});});}}
+                                    style={{fontSize:"11px",padding:"4px 12px",borderRadius:"var(--border-radius-md)",border:"none",cursor:"pointer",fontWeight:600,
+                                      background:appState.action==="approve"?"var(--color-background-success)":"var(--color-background-secondary)",
+                                      color:appState.action==="approve"?"var(--color-text-success)":"var(--color-text-secondary)",
+                                      outline:appState.action==="approve"?"2px solid var(--color-border-success)":"none"}}>✓ Approve</button>
+                                  <button onClick={function(){setApprovalState(function(a){return Object.assign({},a,{[c.id]:Object.assign({},a[c.id]||{},{action:"reject"})});});}}
+                                    style={{fontSize:"11px",padding:"4px 12px",borderRadius:"var(--border-radius-md)",border:"none",cursor:"pointer",fontWeight:600,
+                                      background:appState.action==="reject"?"var(--color-background-danger)":"var(--color-background-secondary)",
+                                      color:appState.action==="reject"?"var(--color-text-danger)":"var(--color-text-secondary)",
+                                      outline:appState.action==="reject"?"2px solid var(--color-border-danger)":"none"}}>✗ Reject</button>
+                                </div>
+                                {appState.action==="reject"&&(
+                                  <input type="text" placeholder="Rejection reason (optional)..." value={appState.reason||""}
+                                    onChange={function(e){var v=e.target.value;setApprovalState(function(a){return Object.assign({},a,{[c.id]:Object.assign({},a[c.id]||{},{reason:v})});});}}
+                                    style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"5px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })()}
 
                       {/* AI justification — editable by Edit+ */}
                       {!isEditing&&!isDisputed&&reviewSelected.justifications&&reviewSelected.justifications[c.id]&&(
@@ -3154,9 +3332,22 @@ Rules:
                 var isAssigned=currentUser.name===reviewSelected.reviewer;
                 return(
                   <div style={{position:"sticky",bottom:"16px",zIndex:100,display:"flex",flexDirection:"column",gap:"8px"}}>
-                    {pendingCount>0&&(
-                      <button onClick={saveDispute} disabled={savingDispute||!isEditor} style={{...btnSuccess,width:"100%",padding:"12px",fontSize:"14px",opacity:savingDispute||!isEditor?0.5:1}}>
+                    {/* Editor: save disputes */}
+                    {isEditor&&pendingCount>0&&(
+                      <button onClick={saveDispute} disabled={savingDispute} style={{...btnSuccess,width:"100%",padding:"12px",fontSize:"14px",opacity:savingDispute?0.5:1}}>
                         {savingDispute?"Saving...":"Save "+pendingCount+" dispute"+(pendingCount!==1?"s":"")+" as "+currentUser.name}
+                      </button>
+                    )}
+                    {/* Agent View: submit disputes for approval */}
+                    {isViewOnly&&pendingCount>0&&(
+                      <button onClick={saveAgentDispute} disabled={savingDispute} style={{...btnInfo,width:"100%",padding:"12px",fontSize:"14px",opacity:savingDispute?0.5:1}}>
+                        {savingDispute?"Submitting...":"Submit "+pendingCount+" dispute"+(pendingCount!==1?"s":"")+" for review"}
+                      </button>
+                    )}
+                    {/* Editor: save approval decisions */}
+                    {isEditor&&Object.keys(approvalState).filter(function(k){return approvalState[k].action;}).length>0&&(
+                      <button onClick={saveDisputeApproval} disabled={savingApproval} style={{...btnSuccess,width:"100%",padding:"12px",fontSize:"14px",opacity:savingApproval?0.5:1}}>
+                        {savingApproval?"Saving...":"Save dispute decisions"}
                       </button>
                     )}
                     {isEditor&&!isReviewed&&pendingCount===0&&isAssigned&&(
