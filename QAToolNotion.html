@@ -2,8 +2,12 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  1.9.3
+  Version:  1.9.4
   Date:     2026-05-19
+
+  Changelog:
+  v1.9.4 (2026-05-19)
+    - Fix: Babel Unicode escape error in buildTranscript — replaced regex char class with split/join
 
   Changelog:
   v1.9.3 (2026-05-19)
@@ -283,7 +287,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v1.9.3";
+const APP_VERSION = "v1.9.4";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
 const CONFIG_DB_ID = "3574e96c994180c08a40f31e89db80ce";
@@ -2250,7 +2254,7 @@ Rules:
       var bodyText = (m.body_text||"").trim();
       var bodyHtml = m.body_html || m.body || "";
       var body = (bodyText && !/<[a-zA-Z]/.test(bodyText)) ? bodyText : stripHTML(bodyHtml);
-      body = body.replace(/[\n\r\t]+/g," ").replace(/\s{2,}/g," ").trim();\n      if(!body || body.length < 5) return;
+      body = body.split("\n").join(" ").split("\r").join(" ").split("\t").join(" ").replace(/  +/g," ").trim();
       var junkWords = ["billing address","shipping address","items ordered","subtotal:","all rights reserved","unsubscribe"];
       var isJunk = junkWords.filter(function(j){return body.toLowerCase().includes(j);}).length >= 2;
       if(isJunk) return;
