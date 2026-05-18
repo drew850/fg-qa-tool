@@ -2,8 +2,13 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  1.9.6
+  Version:  1.9.7
   Date:     2026-05-19
+
+  Changelog:
+  v1.9.7 (2026-05-19)
+    - Fix: Gorgias fetch now matches desktop exporter — no server-side date/status params (caused 400)
+    - Client-side filtering for date range and status, same as exporter
 
   Changelog:
   v1.9.6 (2026-05-19)
@@ -295,7 +300,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v1.9.6";
+const APP_VERSION = "v1.9.7";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
 const CONFIG_DB_ID = "3574e96c994180c08a40f31e89db80ce";
@@ -2297,27 +2302,43 @@ Rules:
         since = d.toISOString().slice(0,10)+"T00:00:00";
       }
 
-      // Fetch tickets page by page
+      // Fetch tickets page by page — no server-side date/status filter (Gorgias API limitation)
+      // Date and status filtering done client-side, matching the desktop exporter behavior
       var allTickets = [];
       var cursor = null;
       var maxTickets = parseInt(f.maxTickets||500) || 500;
-      var params = { limit: 100, status: f.status==="all"?undefined:f.status };
-      if(since) params.created_datetime_gte = since;
-      if(until) params.created_datetime_lte = until;
+      var reachedCutoff = false;
 
       setFetchStatus("Fetching tickets from Gorgias...");
-      while(true) {
+      while(!reachedCutoff) {
+        var params = { limit: 30 };
         if(cursor) params.cursor = cursor;
         var page = await gorgiasAPI("/tickets", params);
         var data = page.data || [];
-        allTickets = allTickets.concat(data);
+        if(!data.length) break;
+
+        for(var ti=0; ti<data.length; ti++) {
+          var t = data[ti];
+          var created = (t.created_datetime||"").slice(0,19);
+          // Skip tickets newer than until
+          if(until && created && created > until) continue;
+          // Stop once we pass the since cutoff
+          if(since && created && created < since) { reachedCutoff = true; break; }
+          // Status filter client-side
+          if(f.status && f.status !== "all") {
+            if((t.status||"").toLowerCase() !== f.status.toLowerCase()) continue;
+          }
+          allTickets.push(t);
+          if(allTickets.length >= maxTickets) { reachedCutoff = true; break; }
+        }
+
         setFetchStatus("Fetched "+allTickets.length+" tickets...");
         var nextCursor = (page.meta||{}).next_cursor || page.next_cursor;
-        if(!nextCursor || allTickets.length >= maxTickets) break;
+        if(!nextCursor || reachedCutoff) break;
         cursor = nextCursor;
+        // Small delay between pages
+        await new Promise(function(r){setTimeout(r,500);});
       }
-
-      allTickets = allTickets.slice(0, maxTickets);
 
       // Apply filters
       var channels = Object.entries(f.channels).filter(function(e){return e[1];}).map(function(e){return e[0];});
