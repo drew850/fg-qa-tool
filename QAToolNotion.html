@@ -2,8 +2,12 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  1.9.1
+  Version:  1.9.2
   Date:     2026-05-19
+
+  Changelog:
+  v1.9.2 (2026-05-19)
+    - Fix: Babel syntax error in stripHTML function (literal newlines in regex replacements)
 
   Changelog:
   v1.9.1 (2026-05-19)
@@ -275,7 +279,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v1.9.1";
+const APP_VERSION = "v1.9.2";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
 const CONFIG_DB_ID = "3574e96c994180c08a40f31e89db80ce";
@@ -2222,16 +2226,12 @@ Rules:
   function stripHTML(html) {
     if(!html) return "";
     html = html.replace(/<blockquote[^>]*>[\s\S]*?<\/blockquote>/gi,"");
-    html = html.replace(/<br\s*\/?>/gi,"
-");
-    html = html.replace(/<\/?(p|div|li|tr|h[1-6])[^>]*>/gi,"
-");
+    html = html.replace(/<br\s*\/?>/gi,"\n");
+    html = html.replace(/<\/?(p|div|li|tr|h[1-6])[^>]*>/gi,"\n");
     html = html.replace(/<[^>]+>/g,"");
     html = html.replace(/&amp;/g,"&").replace(/&lt;/g,"<").replace(/&gt;/g,">")
                .replace(/&nbsp;/g," ").replace(/&#39;/g,"'").replace(/&quot;/g,'"');
-    html = html.replace(/On\s+(Mon|Tue|Wed|Thu|Fri|Sat|Sun)[^
-]*\d{4}[^
-]*:/gi,"");
+    html = html.replace(/On\s+(Mon|Tue|Wed|Thu|Fri|Sat|Sun)[^\n]*\d{4}[^\n]*:/gi,"");
     html = html.replace(/^>+\s?/gm,"");
     return html.replace(/\s+/g," ").trim().slice(0,2000);
   }
