@@ -2,8 +2,13 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  1.9.9
+  Version:  2.0.0
   Date:     2026-05-19
+
+  Changelog:
+  v2.0.0 (2026-05-19)
+    - Fix: Gorgias 429 rate limit handling — retry with exponential backoff (5s/10s/20s/40s/60s)
+    - Fix: Delay between every ticket message fetch (was every 10 tickets)
 
   Changelog:
   v1.9.9 (2026-05-19)
@@ -309,7 +314,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v1.9.9";
+const APP_VERSION = "v2.0.0";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
 const CONFIG_DB_ID = "3574e96c994180c08a40f31e89db80ce";
@@ -2385,22 +2390,43 @@ Rules:
         // Skip agent if already at cap (optimization — avoids fetching messages for capped agents)
         if(perAgent && agentName && (agentCounts[agentName]||0) > perAgent) continue;
 
-        // Fetch messages
+        // Fetch messages with retry on 429
         var transcript = "";
         var msgCount = 0;
-        try {
-          var msgResp = await gorgiasAPI("/tickets/"+tid+"/messages", {limit:100});
-          var messages = msgResp.data || [];
-          msgCount = messages.length;
+        var msgFetched = false;
+        for(var attempt=0; attempt<5; attempt++) {
+          try {
+            var msgResp = await gorgiasAPI("/tickets/"+tid+"/messages", {limit:100});
+            if(msgResp.error && String(msgResp.error).includes("429")) {
+              var wait = [5000,10000,20000,40000,60000][attempt];
+              setFetchStatus("Rate limited — waiting "+(wait/1000)+"s...");
+              await new Promise(function(r){setTimeout(r,wait);});
+              continue;
+            }
+            var messages = msgResp.data || [];
+            msgCount = messages.length;
 
-          // Apply message count filter
-          var minMsg = parseInt(f.msgMin||"")||null;
-          var maxMsg = parseInt(f.msgMax||"")||null;
-          if(minMsg && msgCount < minMsg) continue;
-          if(maxMsg && msgCount > maxMsg) continue;
+            // Apply message count filter
+            var minMsg = parseInt(f.msgMin||"")||null;
+            var maxMsg = parseInt(f.msgMax||"")||null;
+            if(minMsg && msgCount < minMsg) { msgFetched=true; break; }
+            if(maxMsg && msgCount > maxMsg) { msgFetched=true; break; }
 
-          transcript = buildTranscript(messages);
-        } catch(e) { transcript = "Error fetching messages: "+e.message; }
+            transcript = buildTranscript(messages);
+            msgFetched = true;
+            break;
+          } catch(e) {
+            if(attempt===4) transcript = "Error: "+e.message;
+            else await new Promise(function(r){setTimeout(r,3000*(attempt+1));});
+          }
+        }
+        // Skip if message count filter excludes this ticket
+        if(msgFetched && msgCount > 0) {
+          var minMsg2 = parseInt(f.msgMin||"")||null;
+          var maxMsg2 = parseInt(f.msgMax||"")||null;
+          if(minMsg2 && msgCount < minMsg2) continue;
+          if(maxMsg2 && msgCount > maxMsg2) continue;
+        }
 
         var customerEmail = (t.customer||{}).email || "";
         var created = (t.created_datetime||"").slice(0,16).replace("T"," ");
@@ -2439,7 +2465,7 @@ Rules:
         }
 
         // Small delay to avoid rate limiting
-        if(i % 10 === 9) await new Promise(function(r){setTimeout(r,300);});
+        await new Promise(function(r){setTimeout(r,300);});
       }
 
       setFetchedTickets(results);
