@@ -262,7 +262,12 @@ class Handler(BaseHTTPRequestHandler):
             if params:
                 url += "?" + urlencode({k: v for k, v in params.items() if v is not None})
             creds = base64.b64encode(f"{GORGIAS_USERNAME}:{GORGIAS_API_KEY}".encode()).decode()
-            fwd_headers = {"Authorization": f"Basic {creds}", "Content-Type": "application/json"}
+            fwd_headers = {
+                "Authorization": f"Basic {creds}",
+                "Content-Type": "application/json",
+                "User-Agent": "FG-QA-Tool/1.0 (internal)",
+                "Accept": "application/json"
+            }
             try:
                 body_bytes = json.dumps(payload).encode() if payload else None
                 req = urllib.request.Request(url, data=body_bytes, headers=fwd_headers, method=g_method)
