@@ -2,8 +2,12 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  1.9.7
+  Version:  1.9.8
   Date:     2026-05-19
+
+  Changelog:
+  v1.9.8 (2026-05-19)
+    - Fix: Keyword filter now runs before pushing ticket to results (was running after, so filter had no effect)
 
   Changelog:
   v1.9.7 (2026-05-19)
@@ -300,7 +304,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v1.9.7";
+const APP_VERSION = "v1.9.8";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
 const CONFIG_DB_ID = "3574e96c994180c08a40f31e89db80ce";
@@ -2399,6 +2403,13 @@ Rules:
         var customerEmail = (t.customer||{}).email || "";
         var created = (t.created_datetime||"").slice(0,16).replace("T"," ");
 
+        // Keyword filter — check transcript + subject BEFORE pushing
+        if(f.keyword && f.keyword.trim()) {
+          var kw = f.keyword.trim().toLowerCase();
+          var haystack = (transcript + " " + (t.subject||"")).toLowerCase();
+          if(!haystack.includes(kw)) continue;
+        }
+
         results.push({
           ticket_id:           String(tid),
           ticket_url:          "https://"+((window.__ENV__&&window.__ENV__.GORGIAS_DOMAIN)||"freedomgrooming.gorgias.com")+"/app/ticket/"+tid,
@@ -2415,13 +2426,6 @@ Rules:
           message_count:       msgCount,
           transcript:          transcript,
         });
-
-        // Keyword filter — check transcript + subject
-        if(f.keyword && f.keyword.trim()) {
-          var kw = f.keyword.trim().toLowerCase();
-          var haystack = (transcript + " " + (t.subject||"")).toLowerCase();
-          if(!haystack.includes(kw)) continue;
-        }
 
         // Small delay to avoid rate limiting
         if(i % 10 === 9) await new Promise(function(r){setTimeout(r,300);});
