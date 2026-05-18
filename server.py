@@ -10,6 +10,9 @@ GOOGLE_CLIENT_ID    = os.environ.get("GOOGLE_CLIENT_ID", "")
 GOOGLE_CLIENT_SECRET= os.environ.get("GOOGLE_CLIENT_SECRET", "")
 BASE_URL            = os.environ.get("BASE_URL", "https://vigilant-youthfulness-production-896b.up.railway.app")
 REDIRECT_URI        = BASE_URL + "/auth/callback"
+GORGIAS_DOMAIN      = os.environ.get("GORGIAS_DOMAIN", "freedomgrooming.gorgias.com")
+GORGIAS_USERNAME    = os.environ.get("GORGIAS_USERNAME", "")
+GORGIAS_API_KEY     = os.environ.get("GORGIAS_API_KEY", "")
 
 # In-memory session store: token -> {email, name, exp}
 SESSIONS = {}
@@ -25,7 +28,9 @@ def inject_env(html: bytes) -> bytes:
         f'NOTION_TOKEN:"{NOTION_TOKEN}",'
         f'ANTHROPIC_KEY:"{ANTHROPIC_KEY}",'
         f'GOOGLE_CLIENT_ID:"{GOOGLE_CLIENT_ID}",'
-        f'BASE_URL:"{BASE_URL}"'
+        f'BASE_URL:"{BASE_URL}",'
+        f'GORGIAS_DOMAIN:"{GORGIAS_DOMAIN}",'
+        f'GORGIAS_CONFIGURED:{"true" if GORGIAS_USERNAME and GORGIAS_API_KEY else "false"}'
         f'}};</script>'
     )
     return html.replace(b"</head>", snippet.encode() + b"</head>", 1)
@@ -234,6 +239,49 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True})
             return
 
+        # ── Gorgias API proxy ─────────────────────────────────────────────────
+        if path == "/gorgias":
+            if not GORGIAS_USERNAME or not GORGIAS_API_KEY:
+                self._json({"error": "Gorgias credentials not configured"}, 500)
+                return
+            length = int(self.headers.get("Content-Length", 0))
+            raw = self.rfile.read(length) if length else b"{}"
+            try:
+                body = json.loads(raw)
+            except:
+                body = {}
+            endpoint = body.get("endpoint", "")
+            params   = body.get("params", {})
+            g_method = body.get("method", "GET")
+            payload  = body.get("body")
+            if not endpoint:
+                self._json({"error": "endpoint required"}, 400)
+                return
+            import base64
+            url = f"https://{GORGIAS_DOMAIN}/api{endpoint}"
+            if params:
+                url += "?" + urlencode({k: v for k, v in params.items() if v is not None})
+            creds = base64.b64encode(f"{GORGIAS_USERNAME}:{GORGIAS_API_KEY}".encode()).decode()
+            fwd_headers = {"Authorization": f"Basic {creds}", "Content-Type": "application/json"}
+            try:
+                body_bytes = json.dumps(payload).encode() if payload else None
+                req = urllib.request.Request(url, data=body_bytes, headers=fwd_headers, method=g_method)
+                resp = urllib.request.urlopen(req, timeout=30)
+                data = resp.read()
+                self.send_response(resp.status); self._cors()
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers(); self.wfile.write(data)
+            except urllib.error.HTTPError as e:
+                data = e.read()
+                self.send_response(e.code); self._cors()
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers(); self.wfile.write(data)
+            except Exception as e:
+                self._json({"error": str(e)}, 502)
+            return
+
         # ── Proxy ──────────────────────────────────────────────────────────
         if not self.path.startswith("/proxy"):
             self.send_response(404); self.end_headers(); return
@@ -285,4 +333,5 @@ if __name__ == "__main__":
     print(f"HTML version: {get_version()}")
     print(f"HTML exists: {os.path.isfile(os.path.join(DIR, 'QAToolNotion.html'))}")
     print(f"Google SSO: {'configured' if GOOGLE_CLIENT_ID else 'NOT configured'}")
+    print(f"Gorgias: {'configured' if GORGIAS_USERNAME and GORGIAS_API_KEY else 'NOT configured'}")
     HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
