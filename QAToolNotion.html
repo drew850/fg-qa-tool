@@ -2,8 +2,22 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  1.8.3
-  Date:     2026-05-18
+  Version:  1.9.1
+  Date:     2026-05-19
+
+  Changelog:
+  v1.9.1 (2026-05-19)
+    - Fetch Tickets: Keyword filter — optional, searches transcript and subject for matches
+
+  Changelog:
+  v1.9.0 (2026-05-19)
+    - Feature: Fetch Tickets tab (Edit+ only) — pull tickets directly from Gorgias
+    - All filters from desktop tool: date range, status, channel, agent, CR L1, resolution L1, msg count, tickets per agent, max tickets
+    - Preview table shows fetched tickets before any action
+    - Action buttons: Save as CSV / Run QA / Both
+    - Run QA loads tickets into Batch QA tab automatically
+    - Gorgias credentials via Railway env vars: GORGIAS_DOMAIN, GORGIAS_USERNAME, GORGIAS_API_KEY
+    - server.py: new /gorgias proxy endpoint handles auth server-side
 
   Changelog:
   v1.8.3 (2026-05-18)
@@ -261,7 +275,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v1.8.3";
+const APP_VERSION = "v1.9.1";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
 const CONFIG_DB_ID = "3574e96c994180c08a40f31e89db80ce";
@@ -899,7 +913,7 @@ const btnSuccess = { background: "var(--color-background-success)", color: "var(
 const ghost = { background: "transparent", color: "var(--color-text-secondary)", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", padding: "6px 14px", cursor: "pointer", fontSize: "13px" };
 const sectionLabel = { fontSize: "11px", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--color-text-secondary)", margin: "0 0 8px" };
 
-const NAV_TABS = [["batch", "Batch QA"], ["manual", "Manual Audit"], ["dashboard", "Dashboard"], ["review", "Review"], ["reports", "Reports"], ["matrix", "Matrix"], ["calibration", "Calibration"]];
+const NAV_TABS = [["fetch", "Fetch Tickets"], ["batch", "Batch QA"], ["manual", "Manual Audit"], ["dashboard", "Dashboard"], ["review", "Review"], ["reports", "Reports"], ["matrix", "Matrix"], ["calibration", "Calibration"]];
 
 function App() {
   // ── ALL HOOKS FIRST (React rules of hooks - no hooks after conditional returns) ──
@@ -953,6 +967,22 @@ function App() {
 
   // ── SETTINGS STATE ────────────────────────────────────────────────────────
   const [settingsOpen,setSettingsOpen]=useState(false);
+  // Fetch Tickets tab
+  const [fetchForm,setFetchForm]=useState({
+    fromDate:"",toDate:"",lastDays:"7",
+    status:"closed",
+    channels:{email:false,chat:false,sms:false,voice:false,api:false},
+    agentFilter:"Has agent assigned",
+    crL1:"",prodL1:"",resL1:"",
+    msgMin:"",msgMax:"",
+    ticketsPerAgent:"",maxTickets:"500",
+    keyword:""
+  });
+  const [fetchLoading,setFetchLoading]=useState(false);
+  const [fetchStatus,setFetchStatus]=useState("");
+  const [fetchedTickets,setFetchedTickets]=useState([]);
+  const [fetchError,setFetchError]=useState("");
+
   // Manual Audit tab
   const [manualForm,setManualForm]=useState({ticketId:"",agentName:"",contactReason:"",ticketUrl:"",customerEmail:"",week:"",transcript:""});
   const [manualRunning,setManualRunning]=useState(false);
@@ -2178,6 +2208,243 @@ Rules:
   // Derive effective user list for app logic — merge Notion users with hardcoded fallback
   var effectiveUsers = userList.length > 0 ? userList : hardcodedUsersArray();
 
+  // ── GORGIAS FETCH ────────────────────────────────────────────────────────────
+  async function gorgiasAPI(endpoint, params, method) {
+    var resp = await fetch(window.location.origin+"/gorgias", {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify({endpoint: endpoint, params: params||{}, method: method||"GET"})
+    });
+    if(!resp.ok) throw new Error("Gorgias API error: "+resp.status);
+    return resp.json();
+  }
+
+  function stripHTML(html) {
+    if(!html) return "";
+    html = html.replace(/<blockquote[^>]*>[\s\S]*?<\/blockquote>/gi,"");
+    html = html.replace(/<br\s*\/?>/gi,"
+");
+    html = html.replace(/<\/?(p|div|li|tr|h[1-6])[^>]*>/gi,"
+");
+    html = html.replace(/<[^>]+>/g,"");
+    html = html.replace(/&amp;/g,"&").replace(/&lt;/g,"<").replace(/&gt;/g,">")
+               .replace(/&nbsp;/g," ").replace(/&#39;/g,"'").replace(/&quot;/g,'"');
+    html = html.replace(/On\s+(Mon|Tue|Wed|Thu|Fri|Sat|Sun)[^
+]*\d{4}[^
+]*:/gi,"");
+    html = html.replace(/^>+\s?/gm,"");
+    return html.replace(/\s+/g," ").trim().slice(0,2000);
+  }
+
+  function buildTranscript(messages) {
+    var sorted = messages.slice().sort(function(a,b){return (a.created_datetime||"").localeCompare(b.created_datetime||"");});
+    var lines = [];
+    sorted.forEach(function(m){
+      var isAgent = m.from_agent || ((m.sender||{}).meta||{}).is_staff;
+      var role = isAgent ? "Agent" : "Customer";
+      var sender = (m.sender||{}).name || role;
+      var bodyText = (m.body_text||"").trim();
+      var bodyHtml = m.body_html || m.body || "";
+      var body = (bodyText && !/<[a-zA-Z]/.test(bodyText)) ? bodyText : stripHTML(bodyHtml);
+      body = body.replace(/[
+
+	]+/g," ").replace(/\s{2,}/g," ").trim();
+      if(!body || body.length < 5) return;
+      var junkWords = ["billing address","shipping address","items ordered","subtotal:","all rights reserved","unsubscribe"];
+      var isJunk = junkWords.filter(function(j){return body.toLowerCase().includes(j);}).length >= 2;
+      if(isJunk) return;
+      var time = (m.created_datetime||"").slice(0,16).replace("T"," ");
+      lines.push("["+role+" - "+sender+" @ "+time+"]: "+body);
+    });
+    return lines.join(" | ");
+  }
+
+  function parseTicketField(ticket, fieldId) {
+    var cf = ticket.custom_fields || {};
+    var val = cf[String(fieldId)];
+    if(!val) return ["",""];
+    if(typeof val === "object") val = val.value || val.text || "";
+    val = String(val).trim();
+    if(!val) return ["",""];
+    if(val.includes("::")) { var p=val.split("::",2); return [p[0].trim(), p[1].trim()]; }
+    return [val, "N/A"];
+  }
+
+  async function fetchGorgiasTickets() {
+    setFetchLoading(true); setFetchError(""); setFetchedTickets([]);
+    var f = fetchForm;
+    try {
+      // Build date params
+      var since = null, until = null;
+      if(f.fromDate && f.toDate) {
+        since = f.fromDate+"T00:00:00";
+        until = f.toDate+"T23:59:59";
+      } else {
+        var d = new Date(); d.setDate(d.getDate() - parseInt(f.lastDays||7));
+        since = d.toISOString().slice(0,10)+"T00:00:00";
+      }
+
+      // Fetch tickets page by page
+      var allTickets = [];
+      var cursor = null;
+      var maxTickets = parseInt(f.maxTickets||500) || 500;
+      var params = { limit: 100, status: f.status==="all"?undefined:f.status };
+      if(since) params.created_datetime_gte = since;
+      if(until) params.created_datetime_lte = until;
+
+      setFetchStatus("Fetching tickets from Gorgias...");
+      while(true) {
+        if(cursor) params.cursor = cursor;
+        var page = await gorgiasAPI("/tickets", params);
+        var data = page.data || [];
+        allTickets = allTickets.concat(data);
+        setFetchStatus("Fetched "+allTickets.length+" tickets...");
+        var nextCursor = (page.meta||{}).next_cursor || page.next_cursor;
+        if(!nextCursor || allTickets.length >= maxTickets) break;
+        cursor = nextCursor;
+      }
+
+      allTickets = allTickets.slice(0, maxTickets);
+
+      // Apply filters
+      var channels = Object.entries(f.channels).filter(function(e){return e[1];}).map(function(e){return e[0];});
+      if(channels.length) allTickets = allTickets.filter(function(t){return channels.includes((t.channel||t.via||"").toLowerCase());});
+      if(f.agentFilter==="Has agent assigned") allTickets = allTickets.filter(function(t){return t.assignee_user;});
+      if(f.agentFilter==="No agent assigned") allTickets = allTickets.filter(function(t){return !t.assignee_user;});
+
+      // Fetch messages and build transcripts
+      var results = [];
+      var perAgent = parseInt(f.ticketsPerAgent||"") || null;
+      var agentCounts = {};
+      var FIELD_CR=9969, FIELD_PROD=5807, FIELD_RES=11375, FIELD_ADDRES=11421;
+
+      for(var i=0; i<allTickets.length; i++) {
+        var t = allTickets[i];
+        var tid = t.id;
+        setFetchStatus("Processing ticket "+(i+1)+" of "+allTickets.length+"...");
+
+        var crParts   = parseTicketField(t, FIELD_CR);
+        var prodParts = parseTicketField(t, FIELD_PROD);
+        var resParts  = parseTicketField(t, FIELD_RES);
+        var addResParts = parseTicketField(t, FIELD_ADDRES);
+
+        // Apply text filters
+        if(f.crL1 && crParts[0].toLowerCase() !== f.crL1.toLowerCase()) continue;
+        if(f.prodL1 && prodParts[0].toLowerCase() !== f.prodL1.toLowerCase()) continue;
+        if(f.resL1 && resParts[0].toLowerCase() !== f.resL1.toLowerCase()) continue;
+
+        var agentName = "";
+        if(t.assignee_user) {
+          var au = t.assignee_user;
+          agentName = au.name || ((au.firstname||"")+" "+(au.lastname||"")).trim();
+        }
+
+        // Tickets per agent cap
+        if(perAgent && agentName) {
+          agentCounts[agentName] = (agentCounts[agentName]||0) + 1;
+          if(agentCounts[agentName] > perAgent) continue;
+        }
+
+        // Fetch messages
+        var transcript = "";
+        var msgCount = 0;
+        try {
+          var msgResp = await gorgiasAPI("/tickets/"+tid+"/messages", {limit:100});
+          var messages = msgResp.data || [];
+          msgCount = messages.length;
+
+          // Apply message count filter
+          var minMsg = parseInt(f.msgMin||"")||null;
+          var maxMsg = parseInt(f.msgMax||"")||null;
+          if(minMsg && msgCount < minMsg) continue;
+          if(maxMsg && msgCount > maxMsg) continue;
+
+          transcript = buildTranscript(messages);
+        } catch(e) { transcript = "Error fetching messages: "+e.message; }
+
+        var customerEmail = (t.customer||{}).email || "";
+        var created = (t.created_datetime||"").slice(0,16).replace("T"," ");
+
+        results.push({
+          ticket_id:           String(tid),
+          ticket_url:          "https://"+((window.__ENV__&&window.__ENV__.GORGIAS_DOMAIN)||"freedomgrooming.gorgias.com")+"/app/ticket/"+tid,
+          subject:             t.subject || "(no subject)",
+          status:              t.status || "",
+          initial_channel:     t.channel || t.via || "",
+          created_date:        created,
+          agent:               agentName,
+          customer_email:      customerEmail,
+          contact_reason_l1:   crParts[0],
+          contact_reason_l2:   crParts[1],
+          product_l1:          prodParts[0],
+          ticket_resolution_l1: resParts[0],
+          message_count:       msgCount,
+          transcript:          transcript,
+        });
+
+        // Keyword filter — check transcript + subject
+        if(f.keyword && f.keyword.trim()) {
+          var kw = f.keyword.trim().toLowerCase();
+          var haystack = (transcript + " " + (t.subject||"")).toLowerCase();
+          if(!haystack.includes(kw)) continue;
+        }
+
+        // Small delay to avoid rate limiting
+        if(i % 10 === 9) await new Promise(function(r){setTimeout(r,300);});
+      }
+
+      setFetchedTickets(results);
+      setFetchStatus("Done — "+results.length+" tickets fetched.");
+    } catch(e) {
+      setFetchError("Error: "+e.message);
+      setFetchStatus("");
+    }
+    setFetchLoading(false);
+  }
+
+  function downloadFetchedCSV() {
+    if(!fetchedTickets.length) return;
+    var keys = Object.keys(fetchedTickets[0]);
+    var rows = [keys.join(",")].concat(fetchedTickets.map(function(r){
+      return keys.map(function(k){
+        var v = String(r[k]||"").replace(/"/g,'""');
+        return '"'+v+'"';
+      }).join(",");
+    }));
+    var blob = new Blob([rows.join("
+")], {type:"text/csv;charset=utf-8;"});
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href=url; a.download="gorgias_export_"+new Date().toISOString().slice(0,10)+".csv";
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(function(){URL.revokeObjectURL(url);},1000);
+    addToast("CSV downloaded");
+  }
+
+  function mapFetchedToQA(ticket) {
+    var cr = (ticket.contact_reason_l1||"") + (ticket.contact_reason_l2&&ticket.contact_reason_l2!=="N/A"?"::"+ticket.contact_reason_l2:"");
+    return {
+      ticketId:     ticket.ticket_id,
+      ticketUrl:    ticket.ticket_url,
+      agentName:    ticket.agent,
+      contactReason:cr,
+      customerEmail:ticket.customer_email,
+      createdDate:  ticket.created_date,
+      transcript:   ticket.transcript,
+      subject:      ticket.subject,
+    };
+  }
+
+  async function runQAOnFetched(downloadCSV) {
+    if(!fetchedTickets.length) return;
+    if(downloadCSV) downloadFetchedCSV();
+    // Map fetched tickets to QA batch format and start batch QA
+    var mapped = fetchedTickets.map(mapFetchedToQA);
+    setBatchTickets(mapped);
+    setActiveTab("batch");
+    addToast("Loaded "+mapped.length+" tickets into Batch QA — ready to score");
+  }
+
   // ── MANUAL AUDIT ─────────────────────────────────────────────────────────────
   async function runManualAudit() {
     if(!manualForm.ticketId.trim()||!manualForm.agentName||!manualForm.transcript.trim()) {
@@ -2719,6 +2986,7 @@ Rules:
           if(!isEditor&&pair[0]==="batch")return false;
           if(!isFullAccess&&pair[0]==="matrix")return false;
           if(!isEditor&&pair[0]==="manual")return false;
+          if(!isEditor&&pair[0]==="fetch")return false;
           if(!isFullAccess&&pair[0]==="calibration")return false;
           return true;
         }).map(function(pair){
@@ -3409,6 +3677,180 @@ Rules:
                   </div>
                 );
               })()}
+            </div>
+          )}
+        </div>
+      )}
+
+            {/* ── FETCH TICKETS TAB ── */}
+      {view==="fetch"&&isEditor&&(
+        <div>
+          <div style={{...card,marginBottom:"16px"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"14px"}}>
+              <div>
+                <p style={{margin:"0 0 2px",fontSize:"15px",fontWeight:600}}>Fetch Tickets from Gorgias</p>
+                <p style={{margin:0,fontSize:"12px",color:"var(--color-text-secondary)"}}>Pull tickets directly from Gorgias, preview them, then save as CSV or run QA.</p>
+              </div>
+              {!(window.__ENV__&&window.__ENV__.GORGIAS_CONFIGURED==="true")&&(
+                <div style={{fontSize:"12px",color:"var(--color-text-warning)",padding:"6px 12px",background:"var(--color-background-warning)",borderRadius:"var(--border-radius-md)",border:"0.5px solid var(--color-border-warning)"}}>
+                  ⚠ Gorgias credentials not configured in Railway
+                </div>
+              )}
+            </div>
+
+            {/* Date range */}
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:"12px",marginBottom:"14px"}}>
+              <div>
+                <label style={{...lbl,marginBottom:"4px"}}>From date</label>
+                <input type="date" value={fetchForm.fromDate} onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{fromDate:e.target.value});});}}
+                  style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+              </div>
+              <div>
+                <label style={{...lbl,marginBottom:"4px"}}>To date</label>
+                <input type="date" value={fetchForm.toDate} onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{toDate:e.target.value});});}}
+                  style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+              </div>
+              <div>
+                <label style={{...lbl,marginBottom:"4px"}}>Or last N days</label>
+                <input type="number" value={fetchForm.lastDays} placeholder="7"
+                  onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{lastDays:e.target.value});});}}
+                  style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+              </div>
+            </div>
+
+            {/* Status */}
+            <div style={{marginBottom:"14px"}}>
+              <label style={{...lbl,marginBottom:"6px"}}>Ticket status</label>
+              <div style={{display:"flex",gap:"16px"}}>
+                {["closed","open","pending","all"].map(function(s){
+                  return <label key={s} style={{display:"flex",alignItems:"center",gap:"5px",fontSize:"12px",cursor:"pointer"}}>
+                    <input type="radio" name="fetchStatus" value={s} checked={fetchForm.status===s}
+                      onChange={function(){setFetchForm(function(f){return Object.assign({},f,{status:s});});}}/>
+                    {s.charAt(0).toUpperCase()+s.slice(1)}
+                  </label>;
+                })}
+              </div>
+            </div>
+
+            {/* Channels */}
+            <div style={{marginBottom:"14px"}}>
+              <label style={{...lbl,marginBottom:"6px"}}>Initial channel</label>
+              <div style={{display:"flex",gap:"16px",flexWrap:"wrap"}}>
+                {["email","chat","sms","voice","api"].map(function(ch){
+                  return <label key={ch} style={{display:"flex",alignItems:"center",gap:"5px",fontSize:"12px",cursor:"pointer"}}>
+                    <input type="checkbox" checked={fetchForm.channels[ch]||false}
+                      onChange={function(e){var v=e.target.checked;setFetchForm(function(f){var c=Object.assign({},f.channels);c[ch]=v;return Object.assign({},f,{channels:c});});}}/>
+                    {ch.charAt(0).toUpperCase()+ch.slice(1)}
+                  </label>;
+                })}
+                <span style={{fontSize:"11px",color:"var(--color-text-secondary)",alignSelf:"center"}}>(none checked = all)</span>
+              </div>
+            </div>
+
+            {/* Agent + text filters */}
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:"12px",marginBottom:"14px"}}>
+              <div>
+                <label style={{...lbl,marginBottom:"4px"}}>Agent assignment</label>
+                <select value={fetchForm.agentFilter} onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{agentFilter:e.target.value});});}}
+                  style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}>
+                  {["All tickets","Has agent assigned","No agent assigned"].map(function(o){return <option key={o} value={o}>{o}</option>;})}
+                </select>
+              </div>
+              <div>
+                <label style={{...lbl,marginBottom:"4px"}}>Contact Reason L1</label>
+                <input type="text" placeholder="e.g. Cancel" value={fetchForm.crL1}
+                  onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{crL1:e.target.value});});}}
+                  style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+              </div>
+              <div>
+                <label style={{...lbl,marginBottom:"4px"}}>Ticket Resolution L1</label>
+                <input type="text" placeholder="e.g. Subscription Canceled" value={fetchForm.resL1}
+                  onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{resL1:e.target.value});});}}
+                  style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+              </div>
+            </div>
+
+            {/* Keyword filter */}
+            <div style={{marginBottom:"14px"}}>
+              <label style={{...lbl,marginBottom:"4px"}}>Keyword filter <span style={{fontWeight:400,textTransform:"none",letterSpacing:0,color:"var(--color-text-secondary)"}}>— optional, searches transcript + subject</span></label>
+              <input type="text" placeholder="e.g. explode, refund, damaged..." value={fetchForm.keyword}
+                onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{keyword:e.target.value});});}}
+                style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+            </div>
+
+            {/* Counts */}
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:"12px",marginBottom:"16px"}}>
+              <div>
+                <label style={{...lbl,marginBottom:"4px"}}>Msg count min</label>
+                <input type="number" placeholder="blank = any" value={fetchForm.msgMin}
+                  onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{msgMin:e.target.value});});}}
+                  style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+              </div>
+              <div>
+                <label style={{...lbl,marginBottom:"4px"}}>Msg count max</label>
+                <input type="number" placeholder="blank = any" value={fetchForm.msgMax}
+                  onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{msgMax:e.target.value});});}}
+                  style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+              </div>
+              <div>
+                <label style={{...lbl,marginBottom:"4px"}}>Tickets per agent</label>
+                <input type="number" placeholder="blank = no limit" value={fetchForm.ticketsPerAgent}
+                  onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{ticketsPerAgent:e.target.value});});}}
+                  style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+              </div>
+              <div>
+                <label style={{...lbl,marginBottom:"4px"}}>Max tickets</label>
+                <input type="number" placeholder="500" value={fetchForm.maxTickets}
+                  onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{maxTickets:e.target.value});});}}
+                  style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+              </div>
+            </div>
+
+            {fetchError&&<div style={{padding:"8px 12px",background:"var(--color-background-danger)",border:"0.5px solid var(--color-border-danger)",borderRadius:"var(--border-radius-md)",fontSize:"12px",color:"var(--color-text-danger)",marginBottom:"12px"}}>{fetchError}</div>}
+            {fetchStatus&&<div style={{fontSize:"12px",color:"var(--color-text-info)",marginBottom:"10px"}}>{fetchStatus}</div>}
+
+            <button onClick={fetchGorgiasTickets} disabled={fetchLoading}
+              style={{...btnSuccess,padding:"10px 28px",fontSize:"13px",opacity:fetchLoading?0.6:1}}>
+              {fetchLoading?"Fetching...":"Pull Tickets"}
+            </button>
+          </div>
+
+          {/* Preview table */}
+          {fetchedTickets.length>0&&(
+            <div style={card}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"14px",flexWrap:"wrap",gap:"8px"}}>
+                <p style={{...sectionLabel,margin:0}}>Preview — {fetchedTickets.length} ticket{fetchedTickets.length!==1?"s":""} fetched</p>
+                <div style={{display:"flex",gap:"8px"}}>
+                  <button onClick={downloadFetchedCSV} style={{...ghost,fontSize:"12px"}}>⬇ Save as CSV</button>
+                  <button onClick={function(){runQAOnFetched(false);}} style={{...btnInfo,fontSize:"12px"}}>▶ Run QA</button>
+                  <button onClick={function(){runQAOnFetched(true);}} style={{...btnSuccess,fontSize:"12px"}}>⬇ CSV + ▶ Run QA</button>
+                </div>
+              </div>
+              <div style={{overflowX:"auto"}}>
+                <table style={{width:"100%",borderCollapse:"collapse",fontSize:"12px"}}>
+                  <thead>
+                    <tr style={{background:"var(--color-background-secondary)"}}>
+                      {["Ticket ID","Agent","Contact Reason","Status","Channel","Created","Msgs"].map(function(h){
+                        return <th key={h} style={{padding:"7px 10px",textAlign:"left",fontSize:"10px",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.07em",color:"var(--color-text-secondary)",borderBottom:"0.5px solid var(--color-border-tertiary)",whiteSpace:"nowrap"}}>{h}</th>;
+                      })}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {fetchedTickets.slice(0,100).map(function(t,i){
+                      return <tr key={t.ticket_id} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"transparent":"var(--color-background-secondary)"}}>
+                        <td style={{padding:"6px 10px"}}><a href={t.ticket_url} target="_blank" style={{color:"var(--color-text-info)",textDecoration:"none"}}>#{t.ticket_id}</a></td>
+                        <td style={{padding:"6px 10px"}}>{t.agent||"—"}</td>
+                        <td style={{padding:"6px 10px"}}>{t.contact_reason_l1||"—"}{t.contact_reason_l2&&t.contact_reason_l2!=="N/A"&&<span style={{color:"var(--color-text-secondary)"}}>::{t.contact_reason_l2}</span>}</td>
+                        <td style={{padding:"6px 10px"}}>{t.status}</td>
+                        <td style={{padding:"6px 10px"}}>{t.initial_channel}</td>
+                        <td style={{padding:"6px 10px",whiteSpace:"nowrap"}}>{t.created_date}</td>
+                        <td style={{padding:"6px 10px",textAlign:"center"}}>{t.message_count}</td>
+                      </tr>;
+                    })}
+                  </tbody>
+                </table>
+                {fetchedTickets.length>100&&<p style={{fontSize:"11px",color:"var(--color-text-secondary)",textAlign:"center",marginTop:"10px"}}>Showing first 100 of {fetchedTickets.length} — all will be included in CSV / QA run</p>}
+              </div>
             </div>
           )}
         </div>
