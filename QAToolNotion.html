@@ -2,8 +2,13 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  1.9.8
+  Version:  1.9.9
   Date:     2026-05-19
+
+  Changelog:
+  v1.9.9 (2026-05-19)
+    - Fix: Tickets per agent cap now counts matching tickets only (after all filters including keyword)
+    - Previously cap was applied before keyword filter so bikini+perAgent=10 would give <10 results
 
   Changelog:
   v1.9.8 (2026-05-19)
@@ -304,7 +309,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v1.9.8";
+const APP_VERSION = "v1.9.9";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
 const CONFIG_DB_ID = "3574e96c994180c08a40f31e89db80ce";
@@ -2377,11 +2382,8 @@ Rules:
           agentName = au.name || ((au.firstname||"")+" "+(au.lastname||"")).trim();
         }
 
-        // Tickets per agent cap
-        if(perAgent && agentName) {
-          agentCounts[agentName] = (agentCounts[agentName]||0) + 1;
-          if(agentCounts[agentName] > perAgent) continue;
-        }
+        // Skip agent if already at cap (optimization — avoids fetching messages for capped agents)
+        if(perAgent && agentName && (agentCounts[agentName]||0) > perAgent) continue;
 
         // Fetch messages
         var transcript = "";
@@ -2426,6 +2428,15 @@ Rules:
           message_count:       msgCount,
           transcript:          transcript,
         });
+
+        // Tickets per agent cap — counted after all filters so cap means N matching tickets
+        if(perAgent && agentName) {
+          agentCounts[agentName] = (agentCounts[agentName]||0) + 1;
+          if(agentCounts[agentName] >= perAgent) {
+            // Remove this agent from future processing by marking as capped
+            agentCounts[agentName] = perAgent + 999;
+          }
+        }
 
         // Small delay to avoid rate limiting
         if(i % 10 === 9) await new Promise(function(r){setTimeout(r,300);});
