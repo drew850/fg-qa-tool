@@ -2,8 +2,13 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.1
+  Version:  2.0.2
   Date:     2026-05-19
+
+  Changelog:
+  v2.0.2 (2026-05-19)
+    - Fix: Keyword filter now uses AND logic — all words must appear (bikini trimmer = both words anywhere)
+    - Fix: 429 retry backoff increased to 10s/20s/40s/60s/120s
 
   Changelog:
   v2.0.1 (2026-05-19)
@@ -320,7 +325,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.1";
+const APP_VERSION = "v2.0.2";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
 const CONFIG_DB_ID = "3574e96c994180c08a40f31e89db80ce";
@@ -2405,29 +2410,25 @@ Rules:
           try {
             var msgResp = await gorgiasAPI("/tickets/"+tid+"/messages", {limit:100});
             if(msgResp._status === 429) {
-              var wait = [5000,10000,20000,40000,60000][attempt];
-              setFetchStatus("Rate limited — waiting "+(wait/1000)+"s before retry "+(attempt+1)+"/5...");
+              var wait = [10000,20000,40000,60000,120000][attempt];
+              setFetchStatus("Rate limited by Gorgias — pausing "+(wait/1000)+"s (attempt "+(attempt+1)+"/5)...");
               await new Promise(function(r){setTimeout(r,wait);});
               continue;
             }
             var messages = msgResp.data || [];
             msgCount = messages.length;
-
-            // Apply message count filter
             var minMsg = parseInt(f.msgMin||"")||null;
             var maxMsg = parseInt(f.msgMax||"")||null;
             if(minMsg && msgCount < minMsg) { msgFetched=true; break; }
             if(maxMsg && msgCount > maxMsg) { msgFetched=true; break; }
-
             transcript = buildTranscript(messages);
             msgFetched = true;
             break;
           } catch(e) {
             if(attempt===4) transcript = "Error: "+e.message;
-            else await new Promise(function(r){setTimeout(r,3000*(attempt+1));});
+            else { await new Promise(function(r){setTimeout(r,5000*(attempt+1));}); }
           }
         }
-        // Skip if message count filter excludes this ticket
         if(msgFetched && msgCount > 0) {
           var minMsg2 = parseInt(f.msgMin||"")||null;
           var maxMsg2 = parseInt(f.msgMax||"")||null;
@@ -2438,11 +2439,12 @@ Rules:
         var customerEmail = (t.customer||{}).email || "";
         var created = (t.created_datetime||"").slice(0,16).replace("T"," ");
 
-        // Keyword filter — check transcript + subject BEFORE pushing
+        // Keyword filter — ALL words must appear (AND logic) in transcript + subject
         if(f.keyword && f.keyword.trim()) {
-          var kw = f.keyword.trim().toLowerCase();
           var haystack = (transcript + " " + (t.subject||"")).toLowerCase();
-          if(!haystack.includes(kw)) continue;
+          var kwWords = f.keyword.trim().toLowerCase().split(/\s+/).filter(function(w){return w.length>0;});
+          var allMatch = kwWords.every(function(w){return haystack.includes(w);});
+          if(!allMatch) continue;
         }
 
         results.push({
