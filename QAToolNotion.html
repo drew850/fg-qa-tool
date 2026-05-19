@@ -2,8 +2,12 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.2
+  Version:  2.0.3
   Date:     2026-05-19
+
+  Changelog:
+  v2.0.3 (2026-05-19)
+    - Fix: Agent filter now only applied to View users — Edit+ users see all tickets
 
   Changelog:
   v2.0.2 (2026-05-19)
@@ -325,7 +329,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.2";
+const APP_VERSION = "v2.0.3";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
 const CONFIG_DB_ID = "3574e96c994180c08a40f31e89db80ce";
@@ -1079,7 +1083,7 @@ function App() {
       console.log("[QA] setting currentUser:", {email:em,...user});
       setCurrentUser({email:em,...user,agentName:user.agentName||""});
       setLoginError("");
-      var setup1=Object.assign({},HARDCODED_SETUP,{_agentFilter:user.agentName||""});
+      var setup1=Object.assign({},HARDCODED_SETUP,{_agentFilter:user.role==="view"?(user.agentName||""):""});
       setNotionSetup(HARDCODED_SETUP);
       setLoading(true);
       loadAllData(setup1);
@@ -1136,7 +1140,7 @@ function App() {
       sessionStorage.setItem("qa_session",token);
       setSessionToken(token);
       setCurrentUser({email:em,name:name,role:role,agentName:agentName});
-      var setup2=Object.assign({},HARDCODED_SETUP,{_agentFilter:agentName});
+      var setup2=Object.assign({},HARDCODED_SETUP,{_agentFilter:role==="view"?agentName:""});
       setNotionSetup(HARDCODED_SETUP);
       setLoading(true);
       loadAllData(setup2);
