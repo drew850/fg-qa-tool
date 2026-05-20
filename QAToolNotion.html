@@ -2,8 +2,14 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.4
+  Version:  2.0.5
   Date:     2026-05-19
+
+  Changelog:
+  v2.0.5 (2026-05-19)
+    - Fetch Tickets: Added L2 filters for Contact Reason, Ticket Resolution, Additional Resolution
+    - Fetch Tickets: Additional Resolution L1/L2 now included in results and CSV export
+    - Filters match exactly how the desktop exporter handles L1/L2 field matching
 
   Changelog:
   v2.0.4 (2026-05-19)
@@ -334,7 +340,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.4";
+const APP_VERSION = "v2.0.5";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
 const CONFIG_DB_ID = "3574e96c994180c08a40f31e89db80ce";
@@ -1032,7 +1038,7 @@ function App() {
     status:"closed",
     channels:{email:false,chat:false,sms:false,voice:false,api:false},
     agentFilter:"Has agent assigned",
-    crL1:"",prodL1:"",resL1:"",
+    crL1:"",crL2:"",prodL1:"",resL1:"",resL2:"",addResL1:"",addResL2:"",
     msgMin:"",msgMax:"",
     ticketsPerAgent:"",maxTickets:"500",
     keyword:""
@@ -2397,10 +2403,14 @@ Rules:
         var resParts  = parseTicketField(t, FIELD_RES);
         var addResParts = parseTicketField(t, FIELD_ADDRES);
 
-        // Apply text filters
+        // Apply text filters — L1 and L2
         if(f.crL1 && crParts[0].toLowerCase() !== f.crL1.toLowerCase()) continue;
+        if(f.crL2 && crParts[1].toLowerCase() !== f.crL2.toLowerCase()) continue;
         if(f.prodL1 && prodParts[0].toLowerCase() !== f.prodL1.toLowerCase()) continue;
         if(f.resL1 && resParts[0].toLowerCase() !== f.resL1.toLowerCase()) continue;
+        if(f.resL2 && resParts[1].toLowerCase() !== f.resL2.toLowerCase()) continue;
+        if(f.addResL1 && addResParts[0].toLowerCase() !== f.addResL1.toLowerCase()) continue;
+        if(f.addResL2 && addResParts[1].toLowerCase() !== f.addResL2.toLowerCase()) continue;
 
         var agentName = "";
         if(t.assignee_user) {
@@ -2469,6 +2479,9 @@ Rules:
           contact_reason_l2:   crParts[1],
           product_l1:          prodParts[0],
           ticket_resolution_l1: resParts[0],
+          ticket_resolution_l2: resParts[1],
+          additional_resolution_l1: addResParts[0],
+          additional_resolution_l2: addResParts[1],
           message_count:       msgCount,
           transcript:          transcript,
         });
@@ -3836,7 +3849,7 @@ Rules:
             </div>
 
             {/* Agent + text filters */}
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:"12px",marginBottom:"14px"}}>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:"12px",marginBottom:"10px"}}>
               <div>
                 <label style={{...lbl,marginBottom:"4px"}}>Agent assignment</label>
                 <select value={fetchForm.agentFilter} onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{agentFilter:e.target.value});});}}
@@ -3846,14 +3859,40 @@ Rules:
               </div>
               <div>
                 <label style={{...lbl,marginBottom:"4px"}}>Contact Reason L1</label>
-                <input type="text" placeholder="e.g. Cancel" value={fetchForm.crL1}
+                <input type="text" placeholder="e.g. Order Status" value={fetchForm.crL1}
                   onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{crL1:e.target.value});});}}
                   style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
               </div>
               <div>
+                <label style={{...lbl,marginBottom:"4px"}}>Contact Reason L2</label>
+                <input type="text" placeholder="e.g. Delivered, Not Received" value={fetchForm.crL2}
+                  onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{crL2:e.target.value});});}}
+                  style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+              </div>
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:"12px",marginBottom:"14px"}}>
+              <div>
                 <label style={{...lbl,marginBottom:"4px"}}>Ticket Resolution L1</label>
-                <input type="text" placeholder="e.g. Subscription Canceled" value={fetchForm.resL1}
+                <input type="text" placeholder="e.g. Refund Issued" value={fetchForm.resL1}
                   onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{resL1:e.target.value});});}}
+                  style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+              </div>
+              <div>
+                <label style={{...lbl,marginBottom:"4px"}}>Ticket Resolution L2</label>
+                <input type="text" placeholder="e.g. Full Refund" value={fetchForm.resL2}
+                  onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{resL2:e.target.value});});}}
+                  style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+              </div>
+              <div>
+                <label style={{...lbl,marginBottom:"4px"}}>Add. Resolution L1</label>
+                <input type="text" placeholder="e.g. Replacement" value={fetchForm.addResL1}
+                  onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{addResL1:e.target.value});});}}
+                  style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+              </div>
+              <div>
+                <label style={{...lbl,marginBottom:"4px"}}>Add. Resolution L2</label>
+                <input type="text" placeholder="e.g. Blade Refill" value={fetchForm.addResL2}
+                  onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{addResL2:e.target.value});});}}
                   style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
               </div>
             </div>
