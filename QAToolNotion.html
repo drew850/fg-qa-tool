@@ -2,8 +2,13 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.3
+  Version:  2.0.4
   Date:     2026-05-19
+
+  Changelog:
+  v2.0.4 (2026-05-19)
+    - Fix: Any Edit+ user can review any ticket — removed hardcoded reviewer assignment check
+    - Removed "This ticket is assigned to X" blocking message
 
   Changelog:
   v2.0.3 (2026-05-19)
@@ -329,7 +334,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.3";
+const APP_VERSION = "v2.0.4";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
 const CONFIG_DB_ID = "3574e96c994180c08a40f31e89db80ce";
@@ -3669,7 +3674,7 @@ Rules:
 
               {/* Reviewer Notes — scrolls with page, NOT sticky */}
               {(function(){
-                var isAssigned=currentUser.name===reviewSelected.reviewer;
+                var isAssigned=isEditor; // Any Edit+ user can review any ticket
                 return(
                   <React.Fragment>
                     {isEditor&&isAssigned&&(
@@ -3697,7 +3702,7 @@ Rules:
               {(function(){
                 var pendingCount=Object.values(disputeState).filter(function(d){return (d.newScore&&d.justification&&d.justification.trim())||d.removed;}).length;
                 var isReviewed=reviewedTickets[reviewSelected.id||reviewSelected.ticketId]||reviewSelected.reviewed;
-                var isAssigned=currentUser.name===reviewSelected.reviewer;
+                var isAssigned=isEditor; // Any Edit+ user can review any ticket
                 return(
                   <div style={{position:"sticky",bottom:"16px",zIndex:100,display:"flex",flexDirection:"column",gap:"8px"}}>
                     {/* Editor: save disputes */}
@@ -3727,11 +3732,7 @@ Rules:
                         {savingReviewed?"Saving...":"✓ Reviewed — no dispute"}
                       </button>
                     )}
-                    {isEditor&&!isReviewed&&pendingCount===0&&!isAssigned&&(
-                      <div style={{textAlign:"center",padding:"10px",fontSize:"12px",color:"var(--color-text-secondary)",background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)"}}>
-                        This ticket is assigned to {reviewSelected.reviewer}
-                      </div>
-                    )}
+
                     {isReviewed&&(
                       <div style={{display:"flex",gap:"8px",alignItems:"center"}}>
                         <div style={{flex:1,textAlign:"center",padding:"10px",fontSize:"12px",color:"var(--color-text-success)",fontWeight:600,background:"var(--color-background-success)",borderRadius:"var(--border-radius-md)",border:"0.5px solid var(--color-border-success)"}}>
