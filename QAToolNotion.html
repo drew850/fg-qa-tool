@@ -2,8 +2,14 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.5
+  Version:  2.0.6
   Date:     2026-05-19
+
+  Changelog:
+  v2.0.6 (2026-05-19)
+    - Fix: Field filters (CR L1/L2, Resolution, etc.) applied BEFORE fetching messages
+    - This eliminates unnecessary message API calls and dramatically reduces 429 rate limiting
+    - e.g. CR L2 filter now only fetches messages for matching tickets, not all 836
 
   Changelog:
   v2.0.5 (2026-05-19)
@@ -340,7 +346,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.5";
+const APP_VERSION = "v2.0.6";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
 const CONFIG_DB_ID = "3574e96c994180c08a40f31e89db80ce";
@@ -2396,21 +2402,21 @@ Rules:
       for(var i=0; i<allTickets.length; i++) {
         var t = allTickets[i];
         var tid = t.id;
-        setFetchStatus("Processing ticket "+(i+1)+" of "+allTickets.length+"...");
+        setFetchStatus("Processing ticket "+(i+1)+" of "+allTickets.length+"... ("+results.length+" matched so far)");
 
         var crParts   = parseTicketField(t, FIELD_CR);
         var prodParts = parseTicketField(t, FIELD_PROD);
         var resParts  = parseTicketField(t, FIELD_RES);
         var addResParts = parseTicketField(t, FIELD_ADDRES);
 
-        // Apply text filters — L1 and L2
+        // Apply ALL field filters BEFORE fetching messages (avoids unnecessary API calls)
         if(f.crL1 && crParts[0].toLowerCase() !== f.crL1.toLowerCase()) continue;
-        if(f.crL2 && crParts[1].toLowerCase() !== f.crL2.toLowerCase()) continue;
+        if(f.crL2 && f.crL2.trim() && crParts[1].toLowerCase() !== f.crL2.trim().toLowerCase()) continue;
         if(f.prodL1 && prodParts[0].toLowerCase() !== f.prodL1.toLowerCase()) continue;
         if(f.resL1 && resParts[0].toLowerCase() !== f.resL1.toLowerCase()) continue;
-        if(f.resL2 && resParts[1].toLowerCase() !== f.resL2.toLowerCase()) continue;
+        if(f.resL2 && f.resL2.trim() && resParts[1].toLowerCase() !== f.resL2.trim().toLowerCase()) continue;
         if(f.addResL1 && addResParts[0].toLowerCase() !== f.addResL1.toLowerCase()) continue;
-        if(f.addResL2 && addResParts[1].toLowerCase() !== f.addResL2.toLowerCase()) continue;
+        if(f.addResL2 && f.addResL2.trim() && addResParts[1].toLowerCase() !== f.addResL2.trim().toLowerCase()) continue;
 
         var agentName = "";
         if(t.assignee_user) {
@@ -2418,9 +2424,11 @@ Rules:
           agentName = au.name || ((au.firstname||"")+" "+(au.lastname||"")).trim();
         }
 
-        // Skip agent if already at cap (optimization — avoids fetching messages for capped agents)
+        // Skip agent if already at cap
         if(perAgent && agentName && (agentCounts[agentName]||0) > perAgent) continue;
 
+        // Only fetch messages for tickets that passed ALL field filters
+        // This dramatically reduces API calls when using field filters
         // Fetch messages with retry on 429
         var transcript = "";
         var msgCount = 0;
