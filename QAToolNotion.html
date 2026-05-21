@@ -2,8 +2,15 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.6
+  Version:  2.0.7
   Date:     2026-05-19
+
+  Changelog:
+  v2.0.7 (2026-05-19)
+    - Flow: Edit+ disputes are immediate overrides (status: approved, no approval needed)
+    - Flow: View users can only dispute after ticket is marked Reviewed by an auditor
+    - Flow: View users see "Pending auditor review" message on unreviewed tickets
+    - Dispute button hidden for View users until ticket is reviewed
 
   Changelog:
   v2.0.6 (2026-05-19)
@@ -346,7 +353,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.6";
+const APP_VERSION = "v2.0.7";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
 const CONFIG_DB_ID = "3574e96c994180c08a40f31e89db80ce";
@@ -2917,7 +2924,7 @@ Rules:
       pending.forEach(function(e){
         var catId=e[0],d=e[1];
         if(d.removed){delete updatedDisputes[catId];}
-        else{updatedDisputes[catId]={finalScore:d.newScore,justification:d.justification.trim(),disputer:disputerName,disputedAt:new Date().toISOString()};}
+        else{updatedDisputes[catId]={finalScore:d.newScore,justification:d.justification.trim(),disputer:disputerName,disputedAt:new Date().toISOString(),status:"approved",decidedBy:currentUser.name,decidedAt:new Date().toISOString()};}
       });
       var hasDisputes=Object.keys(updatedDisputes).length>0;
       var merged={};
@@ -3465,11 +3472,17 @@ Rules:
               <div style={card}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"12px"}}>
                   <p style={{margin:0,fontWeight:500,fontSize:"14px"}}>
-                    {isEditor?"Scores — click any category to dispute":isViewOnly?"Scores — click to dispute your ticket":"Scores"}
+                    {isEditor?"Scores — click any category to dispute":isViewOnly&&reviewSelected.reviewed?"Scores — click to dispute your ticket":"Scores"}
                   </p>
                   {isEditor&&<span style={{fontSize:"12px",color:"var(--color-text-secondary)"}}>Disputing as <strong>{currentUser.name}</strong></span>}
-                  {isViewOnly&&<span style={{fontSize:"12px",color:"var(--color-text-secondary)"}}>Disputes require auditor approval</span>}
+                  {isViewOnly&&reviewSelected.reviewed&&<span style={{fontSize:"12px",color:"var(--color-text-secondary)"}}>Disputes require auditor approval</span>}
+                  {isViewOnly&&!reviewSelected.reviewed&&<span style={{fontSize:"12px",color:"var(--color-text-warning)",fontWeight:500}}>⏳ Pending auditor review</span>}
                 </div>
+                {isViewOnly&&!reviewSelected.reviewed&&(
+                  <div style={{padding:"10px 14px",background:"var(--color-background-warning)",borderRadius:"var(--border-radius-md)",fontSize:"12px",color:"var(--color-text-warning)",marginBottom:"12px",border:"0.5px solid var(--color-border-warning)"}}>
+                    Your auditor hasn't reviewed this ticket yet. You'll be able to dispute scores once the review is complete.
+                  </div>
+                )}
                 {(!reviewSelected.aiScores||Object.keys(reviewSelected.aiScores).length===0)&&(
                   <div style={{padding:"10px 14px",background:"var(--color-background-warning)",border:"0.5px solid var(--color-border-warning)",borderRadius:"var(--border-radius-md)",marginBottom:"12px",fontSize:"12px",color:"var(--color-text-warning)"}}>
                     ⚠ Per-category score data is not available for this ticket (Scores JSON was not saved or is empty). The overall score of {reviewSelected.finalScore}% was recorded correctly. You can still dispute categories below by selecting a new score.
@@ -3510,10 +3523,14 @@ Rules:
                                 });}} style={{...ghost,fontSize:"11px",padding:"3px 10px"}}>
                             {isDisputed||hasChange?"Edit":"Dispute"}
                           </button>}
-                          {/* Agent View: show Dispute button only if no existing dispute for this category */}
-                          {!isEditing&&isViewOnly&&!existingDispute&&!ds.editing&&<button onClick={function(){setDisputeState(function(s){
-                                  return Object.assign({},s,{[c.id]:{editing:true,newScore:currentFinal,justification:""}});
-                                });}} style={{...ghost,fontSize:"11px",padding:"3px 10px"}}>Dispute</button>}
+                          {/* Agent View: Dispute button only if ticket is reviewed AND no existing dispute */}
+                          {!isEditing&&isViewOnly&&!existingDispute&&!ds.editing&&(
+                            reviewSelected.reviewed
+                              ? <button onClick={function(){setDisputeState(function(s){
+                                    return Object.assign({},s,{[c.id]:{editing:true,newScore:currentFinal,justification:""}});
+                                  });}} style={{...ghost,fontSize:"11px",padding:"3px 10px"}}>Dispute</button>
+                              : null
+                          )}
                           {/* Agent: show pending badge if dispute submitted */}
                           {isViewOnly&&existingDispute&&existingDispute.status==="pending"&&<span style={{fontSize:"10px",fontWeight:700,padding:"2px 7px",borderRadius:"10px",background:"var(--color-background-warning)",color:"var(--color-text-warning)",border:"0.5px solid var(--color-border-warning)"}}>⏳ Pending</span>}
                           {/* Agent: show approved badge */}
