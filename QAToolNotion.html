@@ -2,8 +2,17 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.7
+  Version:  2.0.8
   Date:     2026-05-19
+
+  Changelog:
+  v2.0.8 (2026-05-19)
+    - Feature: Manual autofail in Review tab (Edit+ users)
+    - Dropdown populated from Matrix autofail conditions (not hardcoded)
+    - Add autofail: select condition → confirm → saves to Notion immediately
+    - Remove autofail: requires justification (Edit+ users)
+    - Autofail banner shown in ticket detail when autofail is active
+    - Agents can dispute autofails via existing dispute flow (after reviewed)
 
   Changelog:
   v2.0.7 (2026-05-19)
@@ -353,7 +362,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.7";
+const APP_VERSION = "v2.0.8";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
 const CONFIG_DB_ID = "3574e96c994180c08a40f31e89db80ce";
@@ -1084,6 +1093,12 @@ function App() {
   const [reopenPrompt,setReopenPrompt]=useState(false);
   const [reopenReason,setReopenReason]=useState("");
   const [savingReopen,setSavingReopen]=useState(false);
+  // Manual autofail
+  const [autofailPrompt,setAutofailPrompt]=useState(false);
+  const [autofailSelected,setAutofailSelected]=useState("");
+  const [savingAutofail,setSavingAutofail]=useState(false);
+  const [removeAutofailPrompt,setRemoveAutofailPrompt]=useState(false);
+  const [removeAutofailReason,setRemoveAutofailReason]=useState("");
   // Agent dispute approval
   const [approvalState,setApprovalState]=useState({}); // {catId: {action:"approve"|"reject", reason:""}}
   const [savingApproval,setSavingApproval]=useState(false);
@@ -2193,6 +2208,48 @@ Rules:
       setEditingComments(false);
     } catch(e){addToast("Save failed: "+e.message,"error");}
     setSavingComments(false);
+  }
+
+  // ── MANUAL AUTOFAIL ──────────────────────────────────────────────────────────
+  async function saveManualAutofail(ticket, condition) {
+    if(!condition) { addToast("Please select an autofail condition","error"); return; }
+    setSavingAutofail(true);
+    try {
+      var now = new Date().toISOString();
+      var autofailReason = condition + " (manual — "+currentUser.name+" "+now.slice(0,10)+")";
+      await notionAPI("/v1/pages/"+ticket.notionPageId,"PATCH",{properties:{
+        "Autofail":       {checkbox: true},
+        "Autofails JSON": {rich_text:[{text:{content:JSON.stringify([condition])}}]},
+        "Reviewer Notes": {rich_text:[{text:{content:("AUTOFAIL: "+autofailReason).slice(0,1990)}}]}
+      }});
+      var updated = Object.assign({},ticket,{autofail:true,autofails:[condition]});
+      setTickets(function(ts){return ts.map(function(t){return t.notionPageId===ticket.notionPageId?updated:t;});});
+      setReviewSelected(updated);
+      setAutofailPrompt(false);
+      setAutofailSelected("");
+      addToast("Autofail recorded");
+    } catch(e){addToast("Save failed: "+e.message,"error");}
+    setSavingAutofail(false);
+  }
+
+  async function removeManualAutofail(ticket, reason) {
+    if(!reason||!reason.trim()) { addToast("Please enter a justification","error"); return; }
+    setSavingAutofail(true);
+    try {
+      var now = new Date().toISOString();
+      await notionAPI("/v1/pages/"+ticket.notionPageId,"PATCH",{properties:{
+        "Autofail":       {checkbox: false},
+        "Autofails JSON": {rich_text:[{text:{content:"[]"}}]},
+        "Reviewer Notes": {rich_text:[{text:{content:("AUTOFAIL REMOVED: "+reason.trim()+" — "+currentUser.name+" "+now.slice(0,10)).slice(0,1990)}}]}
+      }});
+      var updated = Object.assign({},ticket,{autofail:false,autofails:[]});
+      setTickets(function(ts){return ts.map(function(t){return t.notionPageId===ticket.notionPageId?updated:t;});});
+      setReviewSelected(updated);
+      setRemoveAutofailPrompt(false);
+      setRemoveAutofailReason("");
+      addToast("Autofail removed");
+    } catch(e){addToast("Save failed: "+e.message,"error");}
+    setSavingAutofail(false);
   }
 
   // ── REOPEN TICKET ─────────────────────────────────────────────────────────────
@@ -3408,8 +3465,43 @@ Rules:
               {/* Back button + ticket header */}
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"14px",flexWrap:"wrap",gap:"8px"}}>
                 <button onClick={function(){setReviewSelected(null);setDisputeState({});}} style={{...ghost,fontSize:"12px"}}>← Back to list</button>
-                <div style={{display:"flex",gap:"8px",alignItems:"center"}}>
+                <div style={{display:"flex",gap:"8px",alignItems:"center",flexWrap:"wrap"}}>
                   {reviewSelected.ticketUrl&&<a href={reviewSelected.ticketUrl} target="_blank" style={{fontSize:"12px",color:"var(--color-text-info)"}}>Open in Gorgias ↗</a>}
+                  {/* Autofail controls */}
+                  {isEditor&&!reviewSelected.autofail&&(
+                    autofailPrompt?(
+                      <div style={{display:"flex",gap:"6px",alignItems:"center",background:"var(--color-background-danger)",padding:"6px 10px",borderRadius:"var(--border-radius-md)",border:"0.5px solid var(--color-border-danger)"}}>
+                        <select value={autofailSelected} onChange={function(e){setAutofailSelected(e.target.value);}}
+                          style={{fontSize:"11px",padding:"4px 6px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",maxWidth:"260px"}}>
+                          <option value="">Select autofail condition...</option>
+                          {autofailList.map(function(af,i){return <option key={i} value={af}>{af}</option>;})}
+                        </select>
+                        <button onClick={function(){saveManualAutofail(reviewSelected,autofailSelected);}} disabled={savingAutofail||!autofailSelected}
+                          style={{fontSize:"11px",padding:"4px 10px",background:"var(--color-background-danger)",color:"var(--color-text-danger)",border:"0.5px solid var(--color-border-danger)",borderRadius:"var(--border-radius-md)",cursor:"pointer",fontWeight:600,opacity:!autofailSelected?0.5:1}}>
+                          {savingAutofail?"Saving...":"Confirm"}
+                        </button>
+                        <button onClick={function(){setAutofailPrompt(false);setAutofailSelected("");}} style={{...ghost,fontSize:"11px",padding:"4px 8px"}}>Cancel</button>
+                      </div>
+                    ):(
+                      <button onClick={function(){setAutofailPrompt(true);}} style={{...ghost,fontSize:"12px",color:"var(--color-text-danger)",borderColor:"var(--color-border-danger)"}}>⚠ Mark autofail</button>
+                    )
+                  )}
+                  {isEditor&&reviewSelected.autofail&&(
+                    removeAutofailPrompt?(
+                      <div style={{display:"flex",gap:"6px",alignItems:"center",background:"var(--color-background-warning)",padding:"6px 10px",borderRadius:"var(--border-radius-md)",border:"0.5px solid var(--color-border-warning)"}}>
+                        <input type="text" placeholder="Justification for removing autofail..."
+                          value={removeAutofailReason} onChange={function(e){setRemoveAutofailReason(e.target.value);}}
+                          style={{fontSize:"11px",padding:"4px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",width:"220px"}}/>
+                        <button onClick={function(){removeManualAutofail(reviewSelected,removeAutofailReason);}} disabled={savingAutofail||!removeAutofailReason.trim()}
+                          style={{fontSize:"11px",padding:"4px 10px",background:"var(--color-background-warning)",color:"var(--color-text-warning)",border:"0.5px solid var(--color-border-warning)",borderRadius:"var(--border-radius-md)",cursor:"pointer",fontWeight:600,opacity:!removeAutofailReason.trim()?0.5:1}}>
+                          {savingAutofail?"Saving...":"Remove"}
+                        </button>
+                        <button onClick={function(){setRemoveAutofailPrompt(false);setRemoveAutofailReason("");}} style={{...ghost,fontSize:"11px",padding:"4px 8px"}}>Cancel</button>
+                      </div>
+                    ):(
+                      <button onClick={function(){setRemoveAutofailPrompt(true);}} style={{...ghost,fontSize:"12px",color:"var(--color-text-warning)",borderColor:"var(--color-border-warning)"}}>✕ Remove autofail</button>
+                    )
+                  )}
                   {isEditor&&<button onClick={function(){deleteAudit(reviewSelected);}} style={{...ghost,fontSize:"12px",color:"var(--color-text-danger)",borderColor:"var(--color-border-danger)"}}>🗑 Delete audit</button>}
                 </div>
               </div>
@@ -3441,6 +3533,14 @@ Rules:
                     )}
                   </div>
                 </div>
+                {/* Autofail banner */}
+                {reviewSelected.autofail&&reviewSelected.autofails&&reviewSelected.autofails.length>0&&(
+                  <div style={{padding:"10px 14px",background:"var(--color-background-danger)",borderRadius:"var(--border-radius-md)",border:"0.5px solid var(--color-border-danger)",marginBottom:"12px"}}>
+                    <div style={{fontSize:"11px",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.07em",color:"var(--color-text-danger)",marginBottom:"4px"}}>⚠ Autofail</div>
+                    {reviewSelected.autofails.map(function(af,i){return <div key={i} style={{fontSize:"12px",color:"var(--color-text-danger)",lineHeight:"1.5"}}>{af}</div>;})}
+                  </div>
+                )}
+
                 {/* Score summary */}
                 <div style={{display:"flex",gap:"12px",flexWrap:"wrap"}}>
                   {(function(){
