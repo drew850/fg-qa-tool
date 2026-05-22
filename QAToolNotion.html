@@ -2,7 +2,7 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.19
+  Version:  2.0.20
   Date:     2026-05-19
 
   Changelog:
@@ -382,7 +382,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.19";
+const APP_VERSION = "v2.0.20";
 const REPORTS_DB_ID = "3684e96c994180db8929c67f306c554a";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
@@ -1930,7 +1930,10 @@ function App() {
         console.log("[QA Reports] Agent:",agentName,"→ email:",agentEmail||"NOT FOUND");
         if(agentEmail){
           var weekLabel = fromVal&&toVal?fromVal+" to "+toVal:(new Date()).toISOString().slice(0,10);
+          setSyncStatus("Saving report for "+agentName+" to Notion...");
           await saveReportToNotion(agentEmail,agentName,weekLabel,html);
+        } else {
+          console.warn("[QA Reports] No email found for agent:",agentName,"— report not saved to Notion");
         }
       }
       if(!added){addToast("No tickets matched","error");setSyncStatus("");return;}
@@ -1991,7 +1994,7 @@ function App() {
         for(var ci2=0;ci2<20;ci2++) newProps["Report Content "+(ci2+1)]={rich_text:[{text:{content:chunks[ci2]||""}}]};
         await notionAPI("/v1/pages","POST",{parent:{database_id:REPORTS_DB_ID},properties:newProps});
       }
-    } catch(e){ console.error("Failed to save report to Notion:",e.message); }
+    } catch(e){ console.error("Failed to save report to Notion:",agentName, e.message, e); addToast("Report save failed for "+agentName+": "+e.message.slice(0,60),"error"); }
   }
 
   async function loadMyReports(email) {
