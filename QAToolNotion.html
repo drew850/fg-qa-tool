@@ -2,8 +2,17 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.8
+  Version:  2.0.9
   Date:     2026-05-19
+
+  Changelog:
+  v2.0.9 (2026-05-19)
+    - Feature: My Reports tab for View users — lists all reports generated for them
+    - Reports saved to QA Reports Notion DB when Full access generates agent reports
+    - Report HTML split into up to 5 chunks (1990 chars each), blank chunks ignored on read
+    - Download .doc button per report — generates client-side from stored HTML
+    - Reports tab only visible to View users; Edit+ use the Reports tab
+    - REPORTS_DB_ID: 3684e96c994180db8929c67f306c554a
 
   Changelog:
   v2.0.8 (2026-05-19)
@@ -362,7 +371,8 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.8";
+const APP_VERSION = "v2.0.9";
+const REPORTS_DB_ID = "3684e96c994180db8929c67f306c554a";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
 const CONFIG_DB_ID = "3574e96c994180c08a40f31e89db80ce";
@@ -1000,7 +1010,7 @@ const btnSuccess = { background: "var(--color-background-success)", color: "var(
 const ghost = { background: "transparent", color: "var(--color-text-secondary)", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", padding: "6px 14px", cursor: "pointer", fontSize: "13px" };
 const sectionLabel = { fontSize: "11px", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--color-text-secondary)", margin: "0 0 8px" };
 
-const NAV_TABS = [["fetch", "Fetch Tickets"], ["batch", "Batch QA"], ["manual", "Manual Audit"], ["dashboard", "Dashboard"], ["review", "Review"], ["reports", "Reports"], ["matrix", "Matrix"], ["calibration", "Calibration"]];
+const NAV_TABS = [["fetch", "Fetch Tickets"], ["batch", "Batch QA"], ["manual", "Manual Audit"], ["dashboard", "Dashboard"], ["review", "Review"], ["myreports", "My Reports"], ["reports", "Reports"], ["matrix", "Matrix"], ["calibration", "Calibration"]];
 
 function App() {
   // ── ALL HOOKS FIRST (React rules of hooks - no hooks after conditional returns) ──
@@ -1054,6 +1064,11 @@ function App() {
 
   // ── SETTINGS STATE ────────────────────────────────────────────────────────
   const [settingsOpen,setSettingsOpen]=useState(false);
+  // My Reports tab
+  const [myReports,setMyReports]=useState([]);
+  const [myReportsLoading,setMyReportsLoading]=useState(false);
+  const [myReportsLoaded,setMyReportsLoaded]=useState(false);
+
   // Fetch Tickets tab
   const [fetchForm,setFetchForm]=useState({
     fromDate:"",toDate:"",lastDays:"7",
@@ -1884,6 +1899,15 @@ function App() {
         if(!html)continue;
         zip.file("QA_"+agentName.replace(/[^a-zA-Z0-9]/g,"_")+".doc",html);
         added++;
+        // Save report to Notion for agent access
+        var agentEmail = (function(){
+          var found = effectiveUsers.find(function(u){return u.name===agentName||u.agentName===agentName;});
+          return found?found.email:"";
+        })();
+        if(agentEmail){
+          var weekLabel = fromVal&&toVal?fromVal+" to "+toVal:(new Date()).toISOString().slice(0,10);
+          await saveReportToNotion(agentEmail,agentName,weekLabel,html);
+        }
       }
       if(!added){addToast("No tickets matched","error");setSyncStatus("");return;}
       setSyncStatus("Packaging zip...");
@@ -1896,6 +1920,91 @@ function App() {
       addToast("Downloaded "+added+" agent reports");
     } catch(e){addToast("Failed: "+e.message,"error");}
     setSyncStatus("");
+  }
+
+  // ── MY REPORTS ───────────────────────────────────────────────────────────────
+  function chunkReportContent(html) {
+    // Split HTML into chunks of 1990 chars max, up to 5 chunks
+    var chunks = ["","","","",""];
+    var remaining = html;
+    for(var i=0;i<5;i++){
+      if(!remaining) break;
+      chunks[i] = remaining.slice(0,1990);
+      remaining = remaining.slice(1990);
+    }
+    return chunks;
+  }
+
+  async function saveReportToNotion(agentEmail, agentName, week, html) {
+    if(!REPORTS_DB_ID||!html) return;
+    var chunks = chunkReportContent(html);
+    var now = new Date().toISOString();
+    // Check if a report for this agent+week already exists
+    try {
+      var existing = await notionAPI("/v1/databases/"+REPORTS_DB_ID+"/query","POST",{
+        filter:{and:[
+          {property:"Agent Email",title:{equals:agentEmail}},
+          {property:"Week",rich_text:{equals:week||""}}
+        ]}
+      });
+      var pages = existing.results||[];
+      if(pages.length>0){
+        // Update existing
+        var patch = {
+          "Report Content 1":{rich_text:[{text:{content:chunks[0]}}]},
+          "Report Content 2":{rich_text:[{text:{content:chunks[1]}}]},
+          "Report Content 3":{rich_text:[{text:{content:chunks[2]}}]},
+          "Report Content 4":{rich_text:[{text:{content:chunks[3]}}]},
+          "Report Content 5":{rich_text:[{text:{content:chunks[4]}}]},
+          "Generated At":    {rich_text:[{text:{content:now}}]},
+          "Generated By":    {rich_text:[{text:{content:currentUser.name}}]},
+        };
+        await notionAPI("/v1/pages/"+pages[0].id,"PATCH",{properties:patch});
+      } else {
+        // Create new
+        await notionAPI("/v1/pages","POST",{
+          parent:{database_id:REPORTS_DB_ID},
+          properties:{
+            "Agent Email":     {title:[{text:{content:agentEmail}}]},
+            "Agent Name":      {rich_text:[{text:{content:agentName}}]},
+            "Week":            {rich_text:[{text:{content:week||""}}]},
+            "Report Content 1":{rich_text:[{text:{content:chunks[0]}}]},
+            "Report Content 2":{rich_text:[{text:{content:chunks[1]}}]},
+            "Report Content 3":{rich_text:[{text:{content:chunks[2]}}]},
+            "Report Content 4":{rich_text:[{text:{content:chunks[3]}}]},
+            "Report Content 5":{rich_text:[{text:{content:chunks[4]}}]},
+            "Generated At":    {rich_text:[{text:{content:now}}]},
+            "Generated By":    {rich_text:[{text:{content:currentUser.name}}]},
+          }
+        });
+      }
+    } catch(e){ console.error("Failed to save report to Notion:",e.message); }
+  }
+
+  async function loadMyReports(email) {
+    try {
+      var res = await notionAPI("/v1/databases/"+REPORTS_DB_ID+"/query","POST",{
+        filter:{property:"Agent Email",title:{equals:email}},
+        sorts:[{property:"Generated At",direction:"descending"}]
+      });
+      return (res.results||[]).map(function(p){
+        var getProp = function(name){
+          var prop = p.properties[name];
+          if(!prop) return "";
+          if(prop.title) return (prop.title[0]||{}).plain_text||"";
+          if(prop.rich_text) return (prop.rich_text[0]||{}).plain_text||"";
+          return "";
+        };
+        var html = [1,2,3,4,5].map(function(n){return getProp("Report Content "+n);}).filter(function(c){return c.trim();}).join("");
+        return {
+          id:p.id,
+          week:getProp("Week"),
+          generatedAt:getProp("Generated At"),
+          generatedBy:getProp("Generated By"),
+          html:html
+        };
+      });
+    } catch(e){ return []; }
   }
 
   async function generateTeamInsightZip() {
@@ -3165,6 +3274,8 @@ Rules:
           if(!isEditor&&pair[0]==="manual")return false;
           if(!isEditor&&pair[0]==="fetch")return false;
           if(!isFullAccess&&pair[0]==="calibration")return false;
+          if(isEditor&&pair[0]==="myreports")return false;
+          if(!isViewOnly&&pair[0]==="myreports")return false;
           return true;
         }).map(function(pair){
           return <button key={pair[0]} style={tabStyle(view===pair[0])} onClick={function(){setView(pair[0]);}}>{pair[1]}{pair[0]==="batch"&&batchTickets.length>0&&<span style={{marginLeft:"5px",fontSize:"10px",fontWeight:700,padding:"1px 6px",borderRadius:"999px",background:"var(--color-background-info)",color:"var(--color-text-info)"}}>{batchTickets.length}</span>}</button>;
@@ -4201,6 +4312,73 @@ Rules:
               <div style={{marginTop:"12px",fontSize:"11px",color:"var(--color-text-success)"}}>✓ Saved to Notion as Manual audit</div>
             </div>
           )}
+        </div>
+      )}
+
+            {/* ── MY REPORTS TAB ── */}
+      {view==="myreports"&&isViewOnly&&(
+        <div>
+          <div style={{...card,marginBottom:"16px"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"10px"}}>
+              <div>
+                <p style={{margin:"0 0 2px",fontSize:"15px",fontWeight:600}}>My QA Reports</p>
+                <p style={{margin:0,fontSize:"12px",color:"var(--color-text-secondary)"}}>Reports generated by your auditor. Download any report as a .doc file.</p>
+              </div>
+              <button onClick={function(){
+                setMyReportsLoading(true);
+                loadMyReports(currentUser.email).then(function(reports){
+                  setMyReports(reports);
+                  setMyReportsLoaded(true);
+                  setMyReportsLoading(false);
+                });
+              }} style={{...btnInfo,fontSize:"12px"}}>
+                {myReportsLoading?"Loading...":"↺ Refresh"}
+              </button>
+            </div>
+            {!myReportsLoaded&&!myReportsLoading&&(
+              <div style={{textAlign:"center",padding:"32px",color:"var(--color-text-secondary)",fontSize:"13px"}}>
+                <div style={{marginBottom:"12px",fontSize:"24px"}}>📋</div>
+                <div>Click Refresh to load your reports</div>
+              </div>
+            )}
+            {myReportsLoading&&(
+              <div style={{textAlign:"center",padding:"32px",color:"var(--color-text-secondary)",fontSize:"13px"}}>Loading your reports...</div>
+            )}
+            {myReportsLoaded&&!myReportsLoading&&myReports.length===0&&(
+              <div style={{textAlign:"center",padding:"32px",color:"var(--color-text-secondary)",fontSize:"13px"}}>
+                <div style={{marginBottom:"8px",fontSize:"24px"}}>📭</div>
+                <div>No reports available yet. Reports are generated by your auditor.</div>
+              </div>
+            )}
+            {myReportsLoaded&&myReports.length>0&&(
+              <div>
+                {myReports.map(function(r){
+                  return <div key={r.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"14px 0",borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
+                    <div>
+                      <div style={{fontSize:"13px",fontWeight:600,marginBottom:"3px"}}>Week: {r.week||"—"}</div>
+                      <div style={{fontSize:"11px",color:"var(--color-text-secondary)"}}>
+                        Generated {r.generatedAt?new Date(r.generatedAt).toLocaleDateString("en-US",{month:"long",day:"numeric",year:"numeric"}):"—"}
+                        {r.generatedBy&&<span> by {r.generatedBy}</span>}
+                      </div>
+                    </div>
+                    <button onClick={function(){
+                      if(!r.html){addToast("Report content unavailable","error");return;}
+                      var blob=new Blob([r.html],{type:"application/msword"});
+                      var url=URL.createObjectURL(blob);
+                      var a=document.createElement("a");
+                      a.href=url;
+                      a.download="QA_Report_"+currentUser.name.replace(/[^a-zA-Z0-9]/g,"_")+"_"+(r.week||"").replace(/[^a-zA-Z0-9]/g,"_")+".doc";
+                      document.body.appendChild(a);a.click();document.body.removeChild(a);
+                      setTimeout(function(){URL.revokeObjectURL(url);},1000);
+                      addToast("Report downloaded");
+                    }} style={{...btnInfo,fontSize:"12px",padding:"7px 16px"}}>
+                      ⬇ Download .doc
+                    </button>
+                  </div>;
+                })}
+              </div>
+            )}
+          </div>
         </div>
       )}
 
