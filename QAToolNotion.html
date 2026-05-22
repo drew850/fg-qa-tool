@@ -2,7 +2,7 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.20
+  Version:  2.0.22
   Date:     2026-05-19
 
   Changelog:
@@ -382,7 +382,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.20";
+const APP_VERSION = "v2.0.22";
 const REPORTS_DB_ID = "3684e96c994180db8929c67f306c554a";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
@@ -1556,7 +1556,7 @@ function App() {
       if(!app.length)return null;
       var pass=app.filter(function(t){return catLbl((t.scores&&t.scores[c.id])||"")==="Pass";}).length;
       var pct=Math.round(pass/app.length*100);var tone2=sc(pct);
-      return "<div style='margin-bottom:10px;'><div style='display:flex;justify-content:space-between;margin-bottom:3px;'><span style='font-size:12px;font-weight:500;'>"+c.label+"</span><span style='font-size:12px;font-weight:700;color:"+tone2.t+";'>"+pct+"%</span></div><div style='height:5px;background:#f3f4f6;border-radius:3px;overflow:hidden;'><div style='height:100%;width:"+pct+"%;background:"+tone2.t+";border-radius:3px;'></div></div></div>";
+      return "<div class='cr'><div class='cr-hd'><span class='cr-nm'>"+c.label+"</span><span class='cr-pct' style='color:"+tone2.t+";'>"+pct+"%</span></div><div class='bar-bg'><div class='bar-fg' style='width:"+pct+"%;background:"+tone2.t+";'></div></div></div>";
     }).filter(Boolean).join("");
 
     // Build data summary for AI summary generation
@@ -1597,7 +1597,7 @@ function App() {
         +"\nReturn ONLY the summary text. No labels, no JSON, no preamble.";
       var summaryText=await callClaudeWithRetry(summaryPrompt);
       summaryText=(summaryText||"").replace(/```/g,"").trim();
-      summaryHTML="<div style='font-size:13px;color:#374151;line-height:1.85;margin-bottom:36px;padding:20px 24px;background:#f9fafb;border-radius:10px;border-left:3px solid #d1d5db;'>"+summaryText.replace(/\n/g,"<br/>")+"</div>";
+      summaryHTML="<div class='summary'>"+summaryText.replace(/\n/g,"<br/>")+"</div>";
     } catch(e) {
       // Fallback: rule-based summary built from actual data
       var passRate=Math.round(passed/agentTickets.length*100);
@@ -1640,7 +1640,7 @@ function App() {
       }
 
       var fallbackText=s1+s2+s3+s4;
-      summaryHTML="<div style='font-size:13px;color:#374151;line-height:1.85;margin-bottom:36px;padding:20px 24px;background:#f9fafb;border-radius:10px;border-left:3px solid #d1d5db;'>"+fallbackText+"</div>";
+      summaryHTML="<div class='summary'>"+fallbackText+"</div>";
     }
 
     // Ticket cards — with disputed score handling and winning notes
@@ -1650,20 +1650,17 @@ function App() {
       var finalPct=dispSc?dispSc.pct:t.finalScore;
       var aiPct=t.aiScore||t.finalScore;
       var ts=sc(finalPct);
-      var rl=t.autofail?"Autofail":(dispSc?(!t.autofail&&dispSc.pct>=85):t.passed)?"Pass":"Fail";
+      // Use disputedPassed if set, else recalc from dispSc, else use finalScore threshold
+      var effectivePassed=t.autofail?false:(t.disputedPassed!==undefined)?t.disputedPassed:dispSc?(dispSc.pct>=85):(t.finalScore>=85?true:t.passed);
+      var rl=t.autofail?"Autofail":effectivePassed?"Pass":"Fail";
       var rb=t.autofail||rl==="Fail"?"#fee2e2":"#f0fdf4",rt=t.autofail||rl==="Fail"?"#991b1b":"#166534",rbd=t.autofail||rl==="Fail"?"#fecaca":"#bbf7d0";
 
       // Score display: if disputed, show AI crossed out -> Final
       var scoreHTML;
       if(hasDisputes&&aiPct!==finalPct){
-        scoreHTML="<div style='text-align:right;'>"
-          +"<div style='font-size:13px;color:#9ca3af;text-decoration:line-through;line-height:1;margin-bottom:2px;'>"+aiPct+"%</div>"
-          +"<div style='font-size:26px;font-weight:700;color:"+ts.t+";line-height:1;'>"+finalPct+"%</div>"
-          +"<div style='font-size:10px;color:#92400e;margin-top:3px;font-weight:600;'>Disputed</div>"
-          +"</div>";
+        scoreHTML="<div style='text-align:right'><div class='sc-old'>"+aiPct+"%</div><div class='sc' style='color:"+ts.t+";'>"+finalPct+"%</div><div class='sc-d'>Disputed</div></div>";
       } else {
-        scoreHTML="<div style='font-size:26px;font-weight:700;color:"+ts.t+";line-height:1;'>"+finalPct+"%</div>"
-          +"<div style='font-size:10px;color:#9ca3af;margin-top:2px;'>Reviewed by "+t.reviewer+"</div>";
+        scoreHTML="<div class='sc' style='color:"+ts.t+";'>"+finalPct+"%</div>";
       }
 
       // Per-category chips — winning notes (disputed note if disputed, AI note if not)
@@ -1684,26 +1681,21 @@ function App() {
           noteText=(j.reason||"");
           if(j.improve&&j.improve!=="null") noteText+=" "+j.improve;
         }
-        var noteHTML=noteText?"<div style='font-size:11px;color:#6b7280;line-height:1.5;margin-top:3px;padding-left:4px;'>"+noteText+"</div>":"";
-        return "<div style='padding:8px 0;border-bottom:1px solid #f3f4f6;'>"
-          +"<div style='display:flex;justify-content:space-between;align-items:center;'>"
-          +"<span style='font-size:12px;color:#374151;font-weight:500;'>"+c.label+(dispute?" <span style=\'font-size:10px;color:#92400e;font-weight:600;\'>D</span>":"")+"</span>"
-          +"<span style='font-size:11px;font-weight:700;padding:2px 10px;border-radius:4px;"+badge(lbl)+"'>"+lbl+"</span>"
-          +"</div>"+noteHTML+"</div>";
+        var noteHTML=noteText?"<div class='ci-note'>"+noteText+"</div>":"";
+        return "<div class='ci'><div class='ci-hd'><span class='ci-nm'>"+c.label+(dispute?" <b style='color:#92400e;font-size:10px;'>D</b>":"")+"</span><span class='pill' style='"+badge(lbl)+"'>"+lbl+"</span></div>"+noteHTML+"</div>";
       }).join("");
 
       // AI comments (+ / - lines)
       var commentLines=(t.comments||"").split("\n").filter(function(l){return l.trim();});
       var commHTML="";
       if(commentLines.length){
-        commHTML="<div style='margin-top:14px;padding-top:12px;border-top:1px solid #f3f4f6;'>"
-          +"<div style='font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.07em;color:#6b7280;margin-bottom:8px;'>Audit notes</div>";
+        commHTML="<div class='cmts'><div class='cmts-ttl'>Audit notes</div>";
         commentLines.forEach(function(line){
           var isPos=line.trim().charAt(0)==="+";var isNeg=line.trim().charAt(0)==="-";
           var col=isPos?"#166534":isNeg?"#991b1b":"#374151";
           var brd=isPos?"#bbf7d0":isNeg?"#fecaca":"#e5e7eb";
           var clean=isPos||isNeg?line.trim().slice(1).trim():line;
-          commHTML+="<div style='font-size:12px;color:"+col+";line-height:1.6;margin-bottom:5px;padding-left:10px;border-left:2px solid "+brd+";'>"+clean+"</div>";
+          commHTML+="<div class='cmt' style='color:"+col+";border-color:"+brd+";'>"+clean+"</div>";
         });
         commHTML+="</div>";
       }
@@ -1711,53 +1703,31 @@ function App() {
       // Reviewer notes — separately labeled
       var reviewerNotesHTML="";
       if(t.reviewerNotes&&t.reviewerNotes.trim()){
-        reviewerNotesHTML="<div style='margin-top:12px;padding:10px 14px;background:#f9fafb;border-radius:6px;border:1px solid #e5e7eb;'>"
-          +"<div style='font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.07em;color:#6b7280;margin-bottom:5px;'>Reviewer notes</div>"
-          +"<div style='font-size:12px;color:#374151;line-height:1.6;'>"+t.reviewerNotes.trim()+"</div>"
-          +"</div>";
+        reviewerNotesHTML="<div class='rn'><div class='rn-ttl'>Reviewer notes</div><div class='rn-txt'>"+t.reviewerNotes.trim()+"</div></div>";
       }
 
-      var viewLink=t.ticketUrl?"<a href='"+t.ticketUrl+"' style='font-size:12px;color:#2563eb;text-decoration:none;display:inline-block;margin-top:10px;'>View ticket</a>":"";
+      var viewLink=t.ticketUrl?"<a href='"+t.ticketUrl+"' class='vl'>View ticket</a>":"";
 
-      return "<div style='page-break-inside:avoid;margin-bottom:20px;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden;'>"
-        +"<div style='background:#f9fafb;padding:14px 20px;border-bottom:1px solid #e5e7eb;display:flex;justify-content:space-between;align-items:center;'>"
-          +"<div><div style='font-size:13px;font-weight:700;color:#111827;margin-bottom:2px;'>#"+t.ticketId+"</div>"
-          +"<div style='font-size:11px;color:#6b7280;'>"+t.contactReason+"</div>"
-          +"<div style='font-size:10px;color:#9ca3af;margin-top:2px;'>Reviewed by "+t.reviewer+"</div></div>"
-          +"<div style='display:flex;align-items:center;gap:14px;'>"
-            +scoreHTML
-            +"<div style='padding:4px 12px;border-radius:20px;background:"+rb+";color:"+rt+";border:1px solid "+rbd+";font-size:11px;font-weight:700;'>"+rl+"</div>"
-          +"</div>"
-        +"</div>"
-        +"<div style='padding:14px 20px;'>"+chips+commHTML+reviewerNotesHTML+viewLink+"</div>"
-        +"</div>";
+      return "<div class='tc'><div class='tc-hd'><div><div class='tc-id'>#"+t.ticketId+"</div><div class='tc-cr'>"+t.contactReason+"</div><div class='tc-rv'>Reviewed by "+t.reviewer+"</div></div><div style='display:flex;align-items:center;gap:14px;'>"+scoreHTML+"<div class='badge' style='background:"+rb+";color:"+rt+";border:1px solid "+rbd+";'>"+rl+"</div></div></div><div class='tc-bd'>"+chips+commHTML+reviewerNotesHTML+viewLink+"</div></div>";
     }).join("");
 
-    return "<!DOCTYPE html><html><head><meta charset='utf-8'><style>*{box-sizing:border-box;margin:0;padding:0;}body{font-family:Arial,sans-serif;background:white;color:#111827;-webkit-print-color-adjust:exact;print-color-adjust:exact;}.page{max-width:700px;margin:0 auto;padding:48px 40px 60px;}@media print{.page{padding:32px;}}</style></head><body><div class='page'>"
-      +"<div style='text-align:center;padding-bottom:48px;border-bottom:1px solid #e5e7eb;margin-bottom:40px;'>"
-        +"<div style='font-size:36px;font-weight:700;color:#111827;letter-spacing:-0.5px;margin-bottom:4px;'>"+agentName+"</div>"
-        +"<div style='font-size:13px;color:#9ca3af;margin-bottom:44px;'>QA Review &nbsp;&middot;&nbsp; "+dateLabel+"</div>"
-        +"<div style='font-size:72px;font-weight:700;color:"+tone.t+";line-height:1;margin-bottom:6px;'>"+avg+"%</div>"
-        +"<div style='font-size:11px;text-transform:uppercase;letter-spacing:0.1em;color:#9ca3af;margin-bottom:40px;'>Average QA Score</div>"
-        +"<div style='display:inline-flex;border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;'>"
-          +(function(){
-            var failedLabel = String(failed)+(autofails>0?" (+"+autofails+"AF)":"");
-            var statCells=[["Tickets",agentTickets.length],["Passed",passed],["Failed",failedLabel],["Highest",highest+"%"],["Lowest",lowest+"%"]];
-            return statCells.map(function(p,i){
-              var border=i>0?"border-left:1px solid #e5e7eb;":"";
-              return "<div style=\'padding:14px 24px;"+border+"\'><div style=\'font-size:20px;font-weight:700;color:#111827;\'>"
-                +p[1]+"</div><div style=\'font-size:10px;text-transform:uppercase;letter-spacing:0.07em;color:#9ca3af;margin-top:3px;\'>"
-                +p[0]+"</div></div>";
-            }).join("");
-          })()
-        +"</div>"
+    var CSS="*{box-sizing:border-box;margin:0;padding:0}body{font-family:Arial,sans-serif;background:white;color:#111827}.page{max-width:700px;margin:0 auto;padding:48px 40px 60px}.hdr{text-align:center;padding-bottom:48px;border-bottom:1px solid #e5e7eb;margin-bottom:40px}.hdr-name{font-size:36px;font-weight:700;letter-spacing:-0.5px;margin-bottom:4px}.hdr-sub{font-size:13px;color:#9ca3af;margin-bottom:44px}.hdr-score{font-size:72px;font-weight:700;line-height:1;margin-bottom:6px}.hdr-lbl{font-size:11px;text-transform:uppercase;letter-spacing:.1em;color:#9ca3af;margin-bottom:40px}.stats{display:inline-flex;border:1px solid #e5e7eb;border-radius:10px;overflow:hidden}.stat{padding:14px 24px}.stat+.stat{border-left:1px solid #e5e7eb}.stat-val{font-size:20px;font-weight:700;color:#111827}.stat-lbl{font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:#9ca3af;margin-top:3px}.sec{margin-bottom:40px}.sec-ttl{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:#6b7280;margin-bottom:16px}.cat-box{border:.5px solid #e5e7eb;border-radius:10px;padding:20px}.cr{margin-bottom:10px}.cr-hd{display:flex;justify-content:space-between;margin-bottom:3px}.cr-nm{font-size:12px;font-weight:500}.cr-pct{font-size:12px;font-weight:700}.bar-bg{height:5px;background:#f3f4f6;border-radius:3px;overflow:hidden}.bar-fg{height:100%;border-radius:3px}.summary{font-size:13px;color:#374151;line-height:1.85;margin-bottom:36px;padding:20px 24px;background:#f9fafb;border-radius:10px;border-left:3px solid #d1d5db}.tc{page-break-inside:avoid;margin-bottom:20px;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden}.tc-hd{background:#f9fafb;padding:14px 20px;border-bottom:1px solid #e5e7eb;display:flex;justify-content:space-between;align-items:center}.tc-id{font-size:13px;font-weight:700;color:#111827;margin-bottom:2px}.tc-cr{font-size:11px;color:#6b7280}.tc-rv{font-size:10px;color:#9ca3af;margin-top:2px}.sc{font-size:26px;font-weight:700;line-height:1}.sc-old{font-size:13px;color:#9ca3af;text-decoration:line-through;line-height:1;margin-bottom:2px}.sc-d{font-size:10px;color:#92400e;margin-top:3px;font-weight:600}.badge{padding:4px 12px;border-radius:20px;font-size:11px;font-weight:700}.tc-bd{padding:14px 20px}.ci{padding:8px 0;border-bottom:1px solid #f3f4f6}.ci-hd{display:flex;justify-content:space-between;align-items:center}.ci-nm{font-size:12px;color:#374151;font-weight:500}.pill{font-size:11px;font-weight:700;padding:2px 10px;border-radius:4px}.ci-note{font-size:11px;color:#6b7280;line-height:1.5;margin-top:3px;padding-left:4px}.cmts{margin-top:14px;padding-top:12px;border-top:1px solid #f3f4f6}.cmts-ttl{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#6b7280;margin-bottom:8px}.cmt{font-size:12px;line-height:1.6;margin-bottom:5px;padding-left:10px;border-left:2px solid}.rn{margin-top:12px;padding:10px 14px;background:#f9fafb;border-radius:6px;border:1px solid #e5e7eb}.rn-ttl{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#6b7280;margin-bottom:5px}.rn-txt{font-size:12px;color:#374151;line-height:1.6}.vl{font-size:12px;color:#2563eb;text-decoration:none;display:inline-block;margin-top:10px}.footer{font-size:11px;color:#9ca3af;text-align:center}";return "<!DOCTYPE html><html><head><meta charset='utf-8'><style>"+CSS+"</style></head><body><div class='page'>"
+      +"<div class='hdr'><div class='hdr-name'>"+agentName+"</div><div class='hdr-sub'>QA Review &middot; "+dateLabel+"</div>"
+      +"<div class='hdr-score' style='color:"+tone.t+";'>"+avg+"%</div><div class='hdr-lbl'>Average QA Score</div>"
+      +(function(){
+        var fl=String(failed)+(autofails>0?" (+"+autofails+"AF)":"");
+        return "<div class='stats'>"
+          +[["Tickets",agentTickets.length],["Passed",passed],["Failed",fl],["Highest",highest+"%"],["Lowest",lowest+"%"]]
+          .map(function(p){return "<div class='stat'><div class='stat-val'>"+p[1]+"</div><div class='stat-lbl'>"+p[0]+"</div></div>";}).join("")
+          +"</div>";
+      })()
       +"</div>"
-      +"<div style='margin-bottom:40px;'><h2 style='font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:#6b7280;margin-bottom:16px;'>Category performance</h2><div style='border:0.5px solid #e5e7eb;border-radius:10px;padding:20px;'>"+catSummary+"</div></div>"
+      +"<div class='sec'><h2 class='sec-ttl'>Category performance</h2><div class='cat-box'>"+catSummary+"</div></div>"
       +summaryHTML
-      +"<h2 style='font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:#6b7280;margin-bottom:16px;'>Ticket log &mdash; "+agentTickets.length+" ticket"+(agentTickets.length!==1?"s":"")+" reviewed</h2>"
+      +"<h2 class='sec-ttl'>Ticket log &mdash; "+agentTickets.length+" ticket"+(agentTickets.length!==1?"s":"")+" reviewed</h2>"
       +ticketCards
-      +"<hr style='border:none;border-top:1px solid #e5e7eb;margin:36px 0;'/>"
-      +"<div style='font-size:11px;color:#9ca3af;text-align:center;'>Freedom Grooming QA &nbsp;&middot;&nbsp; "+dateLabel+" &nbsp;&middot;&nbsp; Auditors: "+auditors+"</div>"
+      +"<hr style='border:none;border-top:1px solid #e5e7eb;margin:36px 0'/>"
+      +"<div class='footer'>Freedom Grooming QA &middot; "+dateLabel+" &middot; Auditors: "+auditors+"</div>"
       +"</div></body></html>";
   }
 
