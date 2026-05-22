@@ -2,7 +2,7 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.22
+  Version:  2.0.23
   Date:     2026-05-19
 
   Changelog:
@@ -382,7 +382,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.22";
+const APP_VERSION = "v2.0.23";
 const REPORTS_DB_ID = "3684e96c994180db8929c67f306c554a";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
@@ -2392,6 +2392,37 @@ Rules:
       addToast("Autofail removed");
     } catch(e){addToast("Save failed: "+e.message,"error");}
     setSavingAutofail(false);
+  }
+
+  // ── RECALCULATE FINAL PASSED ────────────────────────────────────────────────
+  async function recalcFinalPassed() {
+    var toFix = tickets.filter(function(t){
+      var effective = t.autofail ? false
+        : (t.disputedPassed!==undefined) ? t.disputedPassed
+        : t.finalScore >= 85;
+      return effective !== !!(t.finalPassed||t.passed) && t.notionPageId;
+    });
+    if(!toFix.length){ addToast("All Final Passed flags are correct — nothing to fix"); return; }
+    addToast("Fixing "+toFix.length+" tickets...");
+    var fixed=0;
+    for(var i=0;i<toFix.length;i++){
+      var t=toFix[i];
+      var correct = t.autofail ? false : (t.disputedPassed!==undefined) ? t.disputedPassed : t.finalScore>=85;
+      try {
+        await notionAPI("/v1/pages/"+t.notionPageId,"PATCH",{properties:{
+          "Final Passed":{checkbox:correct}
+        }});
+        fixed++;
+        setSyncStatus("Fixed "+(i+1)+" of "+toFix.length+"...");
+      } catch(e){ console.error("Fix failed for",t.ticketId,e.message); }
+    }
+    // Update local state
+    setTickets(function(ts){return ts.map(function(t){
+      var correct = t.autofail?false:(t.disputedPassed!==undefined)?t.disputedPassed:t.finalScore>=85;
+      return Object.assign({},t,{finalPassed:correct,passed:correct});
+    });});
+    addToast("Fixed "+fixed+" tickets");
+    setSyncStatus("");
   }
 
   // ── REOPEN TICKET ─────────────────────────────────────────────────────────────
@@ -5291,6 +5322,15 @@ Rules:
                       })}
                     </div>
                   </div>
+
+                  {/* Data integrity — Full access only */}
+                  {isFullAccess&&(
+                    <div style={{border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-lg)",padding:"16px",marginBottom:"20px"}}>
+                      <p style={{margin:"0 0 4px",fontSize:"13px",fontWeight:600}}>Data Integrity</p>
+                      <p style={{margin:"0 0 12px",fontSize:"12px",color:"var(--color-text-secondary)"}}>Recalculate Final Passed for all tickets based on current Final Score. Fixes pass/fail flags that are out of sync after disputes.</p>
+                      <button onClick={recalcFinalPassed} style={{...btnInfo,fontSize:"12px"}}>Recalculate Final Passed</button>
+                    </div>
+                  )}
 
                   {/* Add user form — Full access only */}
                   {isFullAccess&&(
