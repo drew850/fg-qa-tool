@@ -2,7 +2,7 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.16
+  Version:  2.0.17
   Date:     2026-05-19
 
   Changelog:
@@ -382,7 +382,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.16";
+const APP_VERSION = "v2.0.17";
 const REPORTS_DB_ID = "3684e96c994180db8929c67f306c554a";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
@@ -1733,7 +1733,7 @@ function App() {
         +"</div>";
     }).join("");
 
-    return "<!DOCTYPE html><html><head><meta charset='utf-8'><style>*{box-sizing:border-box;margin:0;padding:0;}body{font-family:Arial,sans-serif;background:white;color:#111827;-webkit-print-color-adjust:exact;print-color-adjust:exact;}.page{max-width:700px;margin:0 auto;padding:48px 40px 60px;}@media print{.page{padding:32px;}}</style></head><body><div class='page'>"
+    return "<html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'><head><meta charset='utf-8'><meta name=ProgId content=Word.Document><meta name=Generator content='Microsoft Word 11'><meta name=Originator content='Microsoft Word 11'><!--[if gte mso 9]><xml><w:WordDocument><w:View>Print</w:View><w:Zoom>90</w:Zoom></w:WordDocument></xml><![endif]--><style>*{box-sizing:border-box;margin:0;padding:0;}body{font-family:Arial,sans-serif;background:white;color:#111827;}.page{max-width:700px;margin:0 auto;padding:48px 40px 60px;}</style></head><body><div class='page'>"
       +"<div style='text-align:center;padding-bottom:48px;border-bottom:1px solid #e5e7eb;margin-bottom:40px;'>"
         +"<div style='font-size:36px;font-weight:700;color:#111827;letter-spacing:-0.5px;margin-bottom:4px;'>"+agentName+"</div>"
         +"<div style='font-size:13px;color:#9ca3af;margin-bottom:44px;'>QA Review &nbsp;&middot;&nbsp; "+dateLabel+"</div>"
