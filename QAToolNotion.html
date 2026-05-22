@@ -2,7 +2,7 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.15
+  Version:  2.0.16
   Date:     2026-05-19
 
   Changelog:
@@ -382,7 +382,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.15";
+const APP_VERSION = "v2.0.16";
 const REPORTS_DB_ID = "3684e96c994180db8929c67f306c554a";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
@@ -1523,9 +1523,13 @@ function App() {
   async function buildAgentReportHTML(agentName, fromVal, toVal, onStatus) {
     var agentTickets = tickets.filter(function(t) {
       if(t.agentName !== agentName) return false;
-      var created = (t.createdDate||"").slice(0,10);
-      if(fromVal && created && created < fromVal) return false;
-      if(toVal && created && created > toVal) return false;
+      // Use createdDate if available, fall back to savedAt (many migrated tickets have blank createdDate)
+      var created = ((t.createdDate||"").slice(0,10)) || ((t.savedAt||"").slice(0,10));
+      if(fromVal && toVal) {
+        if(!created) return false; // skip tickets with no date when filtering by range
+        if(created < fromVal) return false;
+        if(created > toVal) return false;
+      }
       return true;
     });
     if(!agentTickets.length) return null;
@@ -1944,7 +1948,13 @@ function App() {
 
   // ── MY REPORTS ───────────────────────────────────────────────────────────────
   function chunkReportContent(html) {
-    // Split HTML into chunks of 1990 chars max, up to 5 chunks
+    // Split HTML into chunks of 1990 chars max, up to 5 chunks = 9950 chars total
+    // If HTML exceeds this, trim ticket cards to fit
+    var maxTotal = 5 * 1990;
+    if(html.length > maxTotal) {
+      // Trim at a safe HTML boundary to avoid broken tags
+      html = html.slice(0, maxTotal - 200) + "...</div></div></body></html>";
+    }
     var chunks = ["","","","",""];
     var remaining = html;
     for(var i=0;i<5;i++){
