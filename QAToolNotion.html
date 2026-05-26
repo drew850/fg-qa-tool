@@ -2,7 +2,7 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.23
+  Version:  2.0.25
   Date:     2026-05-19
 
   Changelog:
@@ -382,7 +382,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.23";
+const APP_VERSION = "v2.0.25";
 const REPORTS_DB_ID = "3684e96c994180db8929c67f306c554a";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
@@ -1042,6 +1042,7 @@ function App() {
   const [loading,setLoading]=useState(false);
   const [toasts,setToasts]=useState([]);
   const [matrixSaved,setMatrixSaved]=useState(false);
+  const [scoringContext,setScoringContext]=useState("Tickets are closed after every agent reply as standard operating procedure. Never penalize agents for ticket closure. Do not interpret a closed ticket as premature or incomplete handling. Evaluate all categories based solely on the completeness and quality of the agent's response, not on ticket status or closure timing.");
   const [editingCat,setEditingCat]=useState(null);
   const [newAutofail,setNewAutofail]=useState("");
   const [ctfTab,setCtfTab]=useState("contactReasons");
@@ -1369,6 +1370,7 @@ function App() {
       +"- Score NA only when a category genuinely does not apply (e.g. no order cancellation = NA for that category)\n"
       +"- If the agent named above has NOT replied yet, score all categories NA except CTF\n"
       +"- Score based on what IS in the transcript\n"
++(scoringContext&&scoringContext.trim()?"- WORKFLOW & CONTEXT NOTES:\n"+scoringContext.trim()+"\n":"")
       +"CATEGORIES:\n"+rubric+"\n\n"
       +"AUTOFAILS:\n"+afLines+"\n\n"
       +"TICKET ID: "+ticket.ticketId+"\n"
@@ -2996,6 +2998,13 @@ Rules:
       setTickets(activeTickets);
       setSyncStatus("Loading users...");
       await loadUsersFromNotion(setup.configDbId);
+      setSyncStatus("Loading matrix...");
+      var savedMatrix = await loadConfigFromNotion(setup.configDbId, "matrix");
+      if(savedMatrix && Array.isArray(savedMatrix)) setMatrix(savedMatrix);
+      var savedAutofails = await loadConfigFromNotion(setup.configDbId, "autofails");
+      if(savedAutofails && Array.isArray(savedAutofails)) setAutofailList(savedAutofails);
+      var savedScoringContext = await loadConfigFromNotion(setup.configDbId, "scoringContext");
+      if(savedScoringContext && typeof savedScoringContext === "string") setScoringContext(savedScoringContext);
       setSyncStatus("");
       if (Array.isArray(t) && t.length > 0) {
         addToast("Loaded " + t.length + " tickets");
@@ -3034,6 +3043,7 @@ Rules:
     try {
       await saveConfigToNotion(notionSetup.configDbId, "matrix", matrix);
       await saveConfigToNotion(notionSetup.configDbId, "autofails", autofailList);
+      await saveConfigToNotion(notionSetup.configDbId, "scoringContext", scoringContext);
       setMatrixSaved(true); setTimeout(() => setMatrixSaved(false), 2000);
       addToast("Matrix saved to Notion");
     } catch(e) { addToast("Save error: " + e.message, "error"); }
@@ -4954,6 +4964,25 @@ Rules:
               {matrixSaved&&<span style={{fontSize:"12px",color:"var(--color-text-success)"}}>Saved!</span>}
               <button onClick={function(){if(window.confirm("Reset to defaults?")){setMatrix(getDefaultMatrix());setAutofailList(DEFAULT_AUTOFAILS);}}} style={ghost}>Reset</button>
               <button onClick={saveMatrix} style={btnInfo}>Save matrix</button>
+            </div>
+          </div>
+
+          {/* Scoring Context — global notes injected into every AI scoring prompt */}
+          <div style={{...card,marginBottom:"16px"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"8px"}}>
+              <div>
+                <p style={{margin:"0 0 2px",fontSize:"13px",fontWeight:600}}>Scoring Context</p>
+                <p style={{margin:0,fontSize:"12px",color:"var(--color-text-secondary)"}}>Global notes injected into every AI scoring prompt. Use this for workflow rules, SOP context, or anything the AI should know when evaluating all tickets.</p>
+              </div>
+            </div>
+            <textarea
+              value={scoringContext}
+              onChange={function(e){setScoringContext(e.target.value);}}
+              placeholder="e.g. Tickets are closed after every agent reply as standard operating procedure..."
+              style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"8px 10px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",minHeight:"80px",resize:"vertical",fontFamily:"inherit",lineHeight:"1.5"}}
+            />
+            <div style={{display:"flex",justifyContent:"flex-end",marginTop:"6px"}}>
+              <button onClick={saveMatrix} style={{...btnInfo,fontSize:"12px"}}>Save</button>
             </div>
           </div>
           {matrix.map(function(cat){
