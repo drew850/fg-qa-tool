@@ -13,6 +13,9 @@ REDIRECT_URI        = BASE_URL + "/auth/callback"
 GORGIAS_DOMAIN      = os.environ.get("GORGIAS_DOMAIN", "freedomgrooming.gorgias.com")
 GORGIAS_USERNAME    = os.environ.get("GORGIAS_USERNAME", "")
 GORGIAS_API_KEY     = os.environ.get("GORGIAS_API_KEY", "")
+EMERGENCY_PIN       = os.environ.get("EMERGENCY_PIN", "")
+
+ALLOWED_DOMAINS     = {"myfreebird.com", "freedom-grooming.com"}
 
 # In-memory session store: token -> {email, name, exp}
 SESSIONS = {}
@@ -21,6 +24,117 @@ SESSION_TTL = 60 * 60 * 24 * 7  # 7 days
 # In-memory OAuth state store: state -> timestamp (prevents CSRF)
 OAUTH_STATES = {}
 OAUTH_STATE_TTL = 300  # 5 minutes
+
+# ── Emergency login page HTML ──────────────────────────────────────────────────
+EMERGENCY_HTML = """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FG QA — Emergency Access</title>
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #0f0f0f;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+  }}
+  .card {{
+    background: #1a1a1a;
+    border: 1px solid #2a2a2a;
+    border-radius: 12px;
+    padding: 40px;
+    width: 360px;
+  }}
+  .logo {{
+    font-size: 12px;
+    color: #444;
+    text-transform: uppercase;
+    letter-spacing: 2px;
+    margin-bottom: 28px;
+  }}
+  h2 {{
+    color: #e0e0e0;
+    font-size: 20px;
+    font-weight: 600;
+    margin-bottom: 8px;
+  }}
+  p {{
+    color: #555;
+    font-size: 13px;
+    margin-bottom: 28px;
+    line-height: 1.5;
+  }}
+  label {{
+    display: block;
+    color: #666;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 6px;
+  }}
+  input {{
+    width: 100%;
+    background: #111;
+    border: 1px solid #2a2a2a;
+    border-radius: 8px;
+    color: #e0e0e0;
+    font-size: 14px;
+    padding: 10px 14px;
+    margin-bottom: 20px;
+    outline: none;
+    transition: border-color 0.2s;
+  }}
+  input:focus {{ border-color: #444; }}
+  button {{
+    width: 100%;
+    background: #222;
+    border: 1px solid #333;
+    border-radius: 8px;
+    color: #ccc;
+    font-size: 14px;
+    padding: 11px;
+    cursor: pointer;
+    transition: background 0.2s, color 0.2s;
+  }}
+  button:hover {{ background: #2a2a2a; color: #e0e0e0; }}
+  .error {{
+    background: #1e0f0f;
+    border: 1px solid #4a1f1f;
+    border-radius: 8px;
+    color: #e06060;
+    font-size: 13px;
+    padding: 10px 14px;
+    margin-bottom: 20px;
+  }}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo">Freedom Grooming &nbsp;·&nbsp; QA Tool</div>
+  <h2>Emergency Access</h2>
+  <p>Use this only if Google SSO is unavailable. Enter your work email and the emergency PIN.</p>
+  {error_block}
+  <form method="POST" action="/emergency">
+    <label>Work Email</label>
+    <input type="email" name="email" placeholder="you@myfreebird.com" required autocomplete="off" autofocus>
+    <label>Emergency PIN</label>
+    <input type="password" name="pin" placeholder="&bull;&bull;&bull;&bull;&bull;&bull;&bull;&bull;" required autocomplete="off">
+    <button type="submit">Access QA Tool</button>
+  </form>
+</div>
+</body>
+</html>"""
+
+def render_emergency(error=None, status=200):
+    error_block = f'<div class="error">{error}</div>' if error else ""
+    html = EMERGENCY_HTML.replace("{error_block}", error_block).encode()
+    return html, status
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
 
 def inject_env(html: bytes) -> bytes:
     snippet = (
@@ -47,7 +161,6 @@ def get_version():
         return "error reading file"
 
 def google_get_token(code):
-    """Exchange authorization code for access token."""
     data = urlencode({
         "code": code,
         "client_id": GOOGLE_CLIENT_ID,
@@ -65,7 +178,6 @@ def google_get_token(code):
     return json.loads(resp.read())
 
 def google_get_userinfo(access_token):
-    """Get user info from Google."""
     req = urllib.request.Request(
         "https://www.googleapis.com/oauth2/v2/userinfo",
         headers={"Authorization": f"Bearer {access_token}"}
@@ -73,22 +185,21 @@ def google_get_userinfo(access_token):
     resp = urllib.request.urlopen(req, timeout=10)
     return json.loads(resp.read())
 
-def create_session(email, name):
-    """Create a session token for verified user."""
+def create_session(email, name, via="google"):
     token = secrets.token_urlsafe(32)
     SESSIONS[token] = {
         "email": email.lower().strip(),
-        "name": name,
-        "exp": time.time() + SESSION_TTL
+        "name":  name,
+        "via":   via,
+        "exp":   time.time() + SESSION_TTL
     }
-    # Clean expired sessions
+    # Clean expired sessions opportunistically
     expired = [k for k, v in SESSIONS.items() if v["exp"] < time.time()]
     for k in expired:
         del SESSIONS[k]
     return token
 
 def verify_session(token):
-    """Verify session token and return user info or None."""
     session = SESSIONS.get(token)
     if not session:
         return None
@@ -97,7 +208,19 @@ def verify_session(token):
         return None
     return session
 
+def parse_form(raw: bytes) -> dict:
+    """Parse application/x-www-form-urlencoded body."""
+    out = {}
+    for pair in raw.decode(errors="replace").split("&"):
+        if "=" in pair:
+            k, v = pair.split("=", 1)
+            out[unquote(k.replace("+", " "))] = unquote(v.replace("+", " "))
+    return out
+
+# ── Request handler ────────────────────────────────────────────────────────────
+
 class Handler(BaseHTTPRequestHandler):
+
     def log_message(self, fmt, *args):
         print(f"[{self.address_string()}] {fmt % args}")
 
@@ -118,26 +241,39 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(msg)
 
+    def _html(self, data: bytes, status=200):
+        self.send_response(status)
+        self._cors()
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def _redirect(self, url):
         self.send_response(302)
         self.send_header("Location", url)
         self.end_headers()
 
     def do_OPTIONS(self):
-        self.send_response(204); self._cors(); self.end_headers()
+        self.send_response(204)
+        self._cors()
+        self.end_headers()
 
     def do_GET(self):
         parsed = urlparse(self.path)
-        path = parsed.path
-        qs = parse_qs(parsed.query)
+        path   = parsed.path
+        qs     = parse_qs(parsed.query)
 
-        # ── Version endpoint ──────────────────────────────────────────────
+        # ── Version ───────────────────────────────────────────────────────
         if path == "/version":
-            v = get_version()
-            self._json({"version": v, "file": os.path.join(DIR, "QAToolNotion.html"), "exists": os.path.isfile(os.path.join(DIR, "QAToolNotion.html"))})
+            self._json({
+                "version": get_version(),
+                "file":    os.path.join(DIR, "QAToolNotion.html"),
+                "exists":  os.path.isfile(os.path.join(DIR, "QAToolNotion.html"))
+            })
             return
 
-        # ── Google OAuth: initiate login ──────────────────────────────────
+        # ── Google OAuth: initiate ────────────────────────────────────────
         if path == "/auth/google":
             if not GOOGLE_CLIENT_ID:
                 self._json({"error": "Google SSO not configured"}, 500)
@@ -145,20 +281,20 @@ class Handler(BaseHTTPRequestHandler):
             state = secrets.token_urlsafe(16)
             OAUTH_STATES[state] = time.time()
             params = urlencode({
-                "client_id": GOOGLE_CLIENT_ID,
-                "redirect_uri": REDIRECT_URI,
+                "client_id":     GOOGLE_CLIENT_ID,
+                "redirect_uri":  REDIRECT_URI,
                 "response_type": "code",
-                "scope": "openid email profile",
-                "state": state,
-                "access_type": "online",
-                "hd": "myfreebird.com"  # restrict to myfreebird.com domain
+                "scope":         "openid email profile",
+                "state":         state,
+                "access_type":   "online",
+                "hd":            "myfreebird.com"
             })
             self._redirect(f"https://accounts.google.com/o/oauth2/v2/auth?{params}")
             return
 
-        # ── Google OAuth: callback ─────────────────────────────────────────
+        # ── Google OAuth: callback ────────────────────────────────────────
         if path == "/auth/callback":
-            code = qs.get("code", [""])[0]
+            code  = qs.get("code",  [""])[0]
             state = qs.get("state", [""])[0]
             error = qs.get("error", [""])[0]
 
@@ -166,33 +302,29 @@ class Handler(BaseHTTPRequestHandler):
                 self._redirect(f"{BASE_URL}/?auth_error={error}")
                 return
 
-            # Verify state (CSRF protection)
             state_time = OAUTH_STATES.pop(state, None)
             if not state_time or (time.time() - state_time) > OAUTH_STATE_TTL:
                 self._redirect(f"{BASE_URL}/?auth_error=invalid_state")
                 return
 
             try:
-                token_data = google_get_token(code)
+                token_data   = google_get_token(code)
                 access_token = token_data.get("access_token")
                 if not access_token:
                     raise Exception("No access token")
                 userinfo = google_get_userinfo(access_token)
-                email = userinfo.get("email", "").lower().strip()
-                name = userinfo.get("name", email.split("@")[0])
-
+                email    = userinfo.get("email", "").lower().strip()
+                name     = userinfo.get("name", email.split("@")[0])
                 if not email:
                     raise Exception("No email returned")
-
-                session_token = create_session(email, name)
-                # Redirect back to app with session token
+                session_token = create_session(email, name, via="google")
                 self._redirect(f"{BASE_URL}/?session={session_token}")
             except Exception as e:
                 print(f"[SSO] Auth error: {e}")
                 self._redirect(f"{BASE_URL}/?auth_error=auth_failed")
             return
 
-        # ── Session verify endpoint ────────────────────────────────────────
+        # ── Session verify ────────────────────────────────────────────────
         if path == "/auth/verify":
             auth_header = self.headers.get("Authorization", "")
             token = auth_header.replace("Bearer ", "").strip()
@@ -205,7 +337,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": False, "error": "Invalid or expired session"}, 401)
             return
 
-        # ── Static file serving ────────────────────────────────────────────
+        # ── Emergency login page (GET) ────────────────────────────────────
+        if path == "/emergency":
+            html, status = render_emergency()
+            self._html(html, status)
+            return
+
+        # ── Static file serving ───────────────────────────────────────────
         if path in ("/", "/index.html"):
             path = "/QAToolNotion.html"
         filepath = os.path.join(DIR, path.lstrip("/"))
@@ -214,23 +352,26 @@ class Handler(BaseHTTPRequestHandler):
                 data = f.read()
             if filepath.endswith(".html"):
                 data = inject_env(data)
-            self.send_response(200); self._cors()
+            self.send_response(200)
+            self._cors()
             self.send_header("Content-Type", "text/html" if filepath.endswith(".html") else "application/octet-stream")
             self.send_header("Content-Length", str(len(data)))
-            self.end_headers(); self.wfile.write(data)
+            self.end_headers()
+            self.wfile.write(data)
         else:
-            self.send_response(404); self.end_headers()
+            self.send_response(404)
+            self.end_headers()
 
     def do_POST(self):
         parsed = urlparse(self.path)
-        path = parsed.path
+        path   = parsed.path
 
-        # ── Session logout ─────────────────────────────────────────────────
+        # ── Session logout ────────────────────────────────────────────────
         if path == "/auth/logout":
             length = int(self.headers.get("Content-Length", 0))
             raw = self.rfile.read(length) if length else b"{}"
             try:
-                body = json.loads(raw)
+                body  = json.loads(raw)
                 token = body.get("token", "")
                 if token in SESSIONS:
                     del SESSIONS[token]
@@ -239,13 +380,47 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True})
             return
 
-        # ── Gorgias API proxy ─────────────────────────────────────────────────
+        # ── Emergency login (POST) ────────────────────────────────────────
+        if path == "/emergency":
+            length = int(self.headers.get("Content-Length", 0))
+            raw    = self.rfile.read(length) if length else b""
+            form   = parse_form(raw)
+
+            submitted_email = form.get("email", "").strip().lower()
+            submitted_pin   = form.get("pin",   "").strip()
+
+            # PIN must be configured
+            if not EMERGENCY_PIN:
+                html, status = render_emergency("Emergency login is not configured. Contact your admin.")
+                self._html(html, 403)
+                return
+
+            # All three checks must pass — use constant-time compare for PIN
+            pin_ok    = secrets.compare_digest(submitted_pin, EMERGENCY_PIN)
+            domain    = submitted_email.split("@")[-1] if "@" in submitted_email else ""
+            domain_ok = domain in ALLOWED_DOMAINS
+
+            # Look up user in active sessions or just validate domain
+            # (Role assignment happens in the frontend via USERS list;
+            #  server only issues a valid session for a known domain.)
+            if not (pin_ok and domain_ok and submitted_email):
+                # Generic message — don't reveal which check failed
+                html, status = render_emergency("Invalid email or PIN.")
+                self._html(html, 401)
+                return
+
+            name          = submitted_email.split("@")[0].replace(".", " ").title()
+            session_token = create_session(submitted_email, name, via="emergency")
+            self._redirect(f"{BASE_URL}/?session={session_token}")
+            return
+
+        # ── Gorgias proxy ─────────────────────────────────────────────────
         if path == "/gorgias":
             if not GORGIAS_USERNAME or not GORGIAS_API_KEY:
                 self._json({"error": "Gorgias credentials not configured"}, 500)
                 return
             length = int(self.headers.get("Content-Length", 0))
-            raw = self.rfile.read(length) if length else b"{}"
+            raw    = self.rfile.read(length) if length else b"{}"
             try:
                 body = json.loads(raw)
             except:
@@ -264,41 +439,50 @@ class Handler(BaseHTTPRequestHandler):
             creds = base64.b64encode(f"{GORGIAS_USERNAME}:{GORGIAS_API_KEY}".encode()).decode()
             fwd_headers = {
                 "Authorization": f"Basic {creds}",
-                "Content-Type": "application/json",
-                "User-Agent": "FG-QA-Tool/1.0 (internal)",
-                "Accept": "application/json"
+                "Content-Type":  "application/json",
+                "User-Agent":    "FG-QA-Tool/1.0 (internal)",
+                "Accept":        "application/json"
             }
             try:
                 body_bytes = json.dumps(payload).encode() if payload else None
-                req = urllib.request.Request(url, data=body_bytes, headers=fwd_headers, method=g_method)
+                req  = urllib.request.Request(url, data=body_bytes, headers=fwd_headers, method=g_method)
                 resp = urllib.request.urlopen(req, timeout=30)
                 data = resp.read()
-                self.send_response(resp.status); self._cors()
+                self.send_response(resp.status)
+                self._cors()
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(data)))
-                self.end_headers(); self.wfile.write(data)
+                self.end_headers()
+                self.wfile.write(data)
             except urllib.error.HTTPError as e:
                 data = e.read()
-                self.send_response(e.code); self._cors()
+                self.send_response(e.code)
+                self._cors()
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(data)))
-                self.end_headers(); self.wfile.write(data)
+                self.end_headers()
+                self.wfile.write(data)
             except Exception as e:
                 self._json({"error": str(e)}, 502)
             return
 
-        # ── Proxy ──────────────────────────────────────────────────────────
+        # ── General proxy ─────────────────────────────────────────────────
         if not self.path.startswith("/proxy"):
-            self.send_response(404); self.end_headers(); return
+            self.send_response(404)
+            self.end_headers()
+            return
 
         qs     = parse_qs(urlparse(self.path).query)
         target = unquote(qs.get("url", [""])[0])
         if not target.startswith("https://"):
-            self.send_response(400); self._cors(); self.end_headers()
-            self.wfile.write(b'{"error":"bad url"}'); return
+            self.send_response(400)
+            self._cors()
+            self.end_headers()
+            self.wfile.write(b'{"error":"bad url"}')
+            return
 
-        length  = int(self.headers.get("Content-Length", 0))
-        raw     = self.rfile.read(length) if length else b"{}"
+        length     = int(self.headers.get("Content-Length", 0))
+        raw        = self.rfile.read(length) if length else b"{}"
         try:    wrapper = json.loads(raw)
         except: wrapper = {}
 
@@ -315,22 +499,28 @@ class Handler(BaseHTTPRequestHandler):
             req  = urllib.request.Request(target, data=body_bytes, headers=fwd, method=method)
             resp = urllib.request.urlopen(req, timeout=120)
             data = resp.read()
-            self.send_response(resp.status); self._cors()
+            self.send_response(resp.status)
+            self._cors()
             self.send_header("Content-Type", resp.headers.get("Content-Type", "application/json"))
             self.send_header("Content-Length", str(len(data)))
-            self.end_headers(); self.wfile.write(data)
+            self.end_headers()
+            self.wfile.write(data)
         except urllib.error.HTTPError as e:
             data = e.read()
-            self.send_response(e.code); self._cors()
+            self.send_response(e.code)
+            self._cors()
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))
-            self.end_headers(); self.wfile.write(data)
+            self.end_headers()
+            self.wfile.write(data)
         except Exception as e:
             msg = json.dumps({"error": str(e)}).encode()
-            self.send_response(502); self._cors()
+            self.send_response(502)
+            self._cors()
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(msg)))
-            self.end_headers(); self.wfile.write(msg)
+            self.end_headers()
+            self.wfile.write(msg)
 
 if __name__ == "__main__":
     print(f"Starting on port {PORT}")
@@ -339,4 +529,5 @@ if __name__ == "__main__":
     print(f"HTML exists: {os.path.isfile(os.path.join(DIR, 'QAToolNotion.html'))}")
     print(f"Google SSO: {'configured' if GOOGLE_CLIENT_ID else 'NOT configured'}")
     print(f"Gorgias: {'configured' if GORGIAS_USERNAME and GORGIAS_API_KEY else 'NOT configured'}")
+    print(f"Emergency login: {'configured' if EMERGENCY_PIN else 'NOT configured — set EMERGENCY_PIN in Railway'}")
     HTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
