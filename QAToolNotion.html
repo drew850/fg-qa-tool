@@ -9,7 +9,8 @@
   v2.0.26 (2026-05-28)
     - Remove email login from main login screen (Google SSO only)
     - Emergency email+PIN login available at /emergency route (server-side)
-    - Requires EMERGENCY_PIN Railway env var to activate
+    - AI coaching suggestion (blue ↑ text) now editable alongside reason in Edit note form
+    - saveNoteEdit persists improve field to Justifications JSON + dedicated Notes field
 
   Changelog:
   v2.0.11 (2026-05-19)
@@ -1118,6 +1119,7 @@ function App() {
   // #10 Note editing
   const [editingNote,setEditingNote]=useState(null); // {ticketId, field} or null
   const [noteEditValue,setNoteEditValue]=useState("");
+  const [noteImproveValue,setNoteImproveValue]=useState("");
   const [savingNote,setSavingNote]=useState(false);
   const [editingComments,setEditingComments]=useState(false);
   const [commentsEditValue,setCommentsEditValue]=useState("");
@@ -2310,22 +2312,35 @@ Rules:
       // Keep max 5 versions per category
       if(history[catId].length>5) history[catId]=history[catId].slice(-5);
       var historyStr = JSON.stringify(history).slice(0,1990);
+      // Build formatted notes field value (reason + improve if set)
+      var improveVal = noteImproveValue.trim()||null;
+      var formattedNote = noteEditValue.trim();
+      if(improveVal) formattedNote += " | \u2191 " + improveVal;
       var patch = {};
-      patch[notionField] = {rich_text:[{text:{content:noteEditValue.trim().slice(0,1990)}}]};
+      patch[notionField] = {rich_text:[{text:{content:formattedNote.slice(0,1990)}}]};
       patch["Notes History JSON"] = {rich_text:[{text:{content:historyStr}}]};
+      // Also update Justifications JSON with new improve value
+      var currentJustJSON = ticket.justificationsJSON||"{}";
+      var justObj = {};
+      try { justObj = JSON.parse(currentJustJSON.replace(/'/g,'"')); } catch(e){}
+      if(!justObj[catId]) justObj[catId]={};
+      justObj[catId].reason = noteEditValue.trim();
+      justObj[catId].improve = improveVal;
+      justObj[catId].edited = true;
+      patch["Justifications JSON"] = {rich_text:[{text:{content:JSON.stringify(justObj).slice(0,1990)}}]};
       await notionAPI("/v1/pages/"+ticket.notionPageId,"PATCH",{properties:patch});
       // Update local state
       setTickets(function(ts){return ts.map(function(t){
         if(t.notionPageId!==ticket.notionPageId) return t;
         var newJust=Object.assign({},t.justifications);
-        newJust[catId]=Object.assign({},newJust[catId]||{},{reason:noteEditValue.trim(),edited:true,editedBy:currentUser.name,editedAt:now});
-        return Object.assign({},t,{justifications:newJust,notesHistoryJSON:historyStr});
+        newJust[catId]=Object.assign({},newJust[catId]||{},{reason:noteEditValue.trim(),improve:improveVal,edited:true,editedBy:currentUser.name,editedAt:now});
+        return Object.assign({},t,{justifications:newJust,notesHistoryJSON:historyStr,justificationsJSON:JSON.stringify(justObj)});
       });});
       setReviewSelected(function(r){
         if(!r||r.notionPageId!==ticket.notionPageId) return r;
         var newJust=Object.assign({},r.justifications);
-        newJust[catId]=Object.assign({},newJust[catId]||{},{reason:noteEditValue.trim(),edited:true,editedBy:currentUser.name,editedAt:now});
-        return Object.assign({},r,{justifications:newJust,notesHistoryJSON:historyStr});
+        newJust[catId]=Object.assign({},newJust[catId]||{},{reason:noteEditValue.trim(),improve:improveVal,edited:true,editedBy:currentUser.name,editedAt:now});
+        return Object.assign({},r,{justifications:newJust,notesHistoryJSON:historyStr,justificationsJSON:JSON.stringify(justObj)});
       });
       addToast("Note updated");
       setEditingNote(null);
@@ -3872,10 +3887,18 @@ Rules:
                         <div style={{marginTop:"6px"}}>
                           {editingNote&&editingNote.ticketId===reviewSelected.notionPageId&&editingNote.field===c.id?(
                             <div>
+                              <div style={{fontSize:"10px",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.07em",color:"var(--color-text-secondary)",marginBottom:"4px"}}>Reason</div>
                               <textarea
                                 value={noteEditValue}
                                 onChange={function(e){setNoteEditValue(e.target.value);}}
-                                style={{width:"100%",boxSizing:"border-box",height:"70px",resize:"vertical",fontFamily:"inherit",fontSize:"12px",lineHeight:"1.5",padding:"6px 8px",border:"0.5px solid var(--color-border-info)",borderRadius:"var(--border-radius-md)",marginBottom:"6px"}}
+                                style={{width:"100%",boxSizing:"border-box",height:"70px",resize:"vertical",fontFamily:"inherit",fontSize:"12px",lineHeight:"1.5",padding:"6px 8px",border:"0.5px solid var(--color-border-info)",borderRadius:"var(--border-radius-md)",marginBottom:"8px"}}
+                              />
+                              <div style={{fontSize:"10px",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.07em",color:"var(--color-text-info)",marginBottom:"4px"}}>↑ Coaching suggestion</div>
+                              <textarea
+                                value={noteImproveValue}
+                                onChange={function(e){setNoteImproveValue(e.target.value);}}
+                                placeholder="Optional — leave blank to remove"
+                                style={{width:"100%",boxSizing:"border-box",height:"55px",resize:"vertical",fontFamily:"inherit",fontSize:"12px",lineHeight:"1.5",padding:"6px 8px",border:"0.5px solid var(--color-border-info)",borderRadius:"var(--border-radius-md)",marginBottom:"8px"}}
                               />
                               <div style={{display:"flex",gap:"6px"}}>
                                 <button onClick={function(){saveNoteEdit(reviewSelected,c.id);}} disabled={savingNote} style={{...btnInfo,fontSize:"11px",padding:"4px 10px"}}>{savingNote?"Saving...":"Save"}</button>
@@ -3889,7 +3912,7 @@ Rules:
                                 {reviewSelected.justifications[c.id].improve&&reviewSelected.justifications[c.id].improve!=="null"&&<span style={{color:"var(--color-text-info)"}}> ↑ {reviewSelected.justifications[c.id].improve}</span>}
                                 {reviewSelected.justifications[c.id].edited&&<span style={{fontSize:"10px",marginLeft:"6px",padding:"1px 5px",background:"var(--color-background-info)",color:"var(--color-text-info)",borderRadius:"3px",border:"0.5px solid var(--color-border-info)"}}>Edited</span>}
                               </div>
-                              {isEditor&&<button onClick={function(){setEditingNote({ticketId:reviewSelected.notionPageId,field:c.id});setNoteEditValue(reviewSelected.justifications[c.id].reason||"");}} style={{fontSize:"10px",padding:"1px 7px",background:"none",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",cursor:"pointer",color:"var(--color-text-secondary)",marginTop:"4px"}}>Edit note</button>}
+                              {isEditor&&<button onClick={function(){setEditingNote({ticketId:reviewSelected.notionPageId,field:c.id});setNoteEditValue(reviewSelected.justifications[c.id].reason||"");setNoteImproveValue(reviewSelected.justifications[c.id].improve&&reviewSelected.justifications[c.id].improve!=="null"?reviewSelected.justifications[c.id].improve:"");}} style={{fontSize:"10px",padding:"1px 7px",background:"none",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",cursor:"pointer",color:"var(--color-text-secondary)",marginTop:"4px"}}>Edit note</button>}
                             </div>
                           )}
                         </div>
