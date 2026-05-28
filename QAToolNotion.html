@@ -2,8 +2,14 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.25
-  Date:     2026-05-19
+  Version:  2.0.26
+  Date:     2026-05-28
+
+  Changelog:
+  v2.0.26 (2026-05-28)
+    - Remove email login from main login screen (Google SSO only)
+    - Emergency email+PIN login available at /emergency route (server-side)
+    - Requires EMERGENCY_PIN Railway env var to activate
 
   Changelog:
   v2.0.11 (2026-05-19)
@@ -382,7 +388,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.25";
+const APP_VERSION = "v2.0.26";
 const REPORTS_DB_ID = "3684e96c994180db8929c67f306c554a";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
@@ -3256,35 +3262,11 @@ Rules:
                 </svg>
                 Sign in with Google
               </button>
-              <div style={{display:"flex",alignItems:"center",gap:"10px",marginBottom:"16px"}}>
-                <div style={{flex:1,height:"1px",background:"var(--color-border-tertiary)"}}/>
-                <span style={{fontSize:"11px",color:"var(--color-text-secondary)"}}>or</span>
-                <div style={{flex:1,height:"1px",background:"var(--color-border-tertiary)"}}/>
-              </div>
             </React.Fragment>
           )}
 
-          {/* Email fallback */}
-          <label style={{fontSize:"11px",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.07em",color:"var(--color-text-secondary)",display:"block",marginBottom:"6px"}}>Email address</label>
-          <input
-            type="text"
-            autoFocus
-            placeholder="you@myfreebird.com"
-            value={loginEmail}
-            onChange={function(e){setLoginEmail(e.target.value);setLoginError("");}}
-            onKeyDown={function(e){if(e.key==="Enter")handleLogin(null);}}
-            style={{width:"100%",boxSizing:"border-box",fontSize:"14px",padding:"9px 12px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",marginBottom:"12px",outline:"none"}}
-          />
-          {loginError&&<p style={{fontSize:"12px",color:"#991b1b",margin:"0 0 10px"}}>{loginError}</p>}
-          <button
-            onClick={function(){handleLogin(null);}}
-            style={{width:"100%",padding:"10px",fontSize:"14px",fontWeight:600,background:"#2563eb",color:"white",border:"none",borderRadius:"8px",cursor:"pointer"}}
-          >
-            Sign in
-          </button>
-
-          <p style={{fontSize:"11px",color:"var(--color-text-secondary)",textAlign:"center",marginTop:"16px",marginBottom:0}}>
-            Use your @myfreebird.com Google account for SSO
+          <p style={{fontSize:"11px",color:"var(--color-text-secondary)",textAlign:"center",marginTop:"8px",marginBottom:0}}>
+            Use your @myfreebird.com Google account to sign in
           </p>
         </div>
       </div>
