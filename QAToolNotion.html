@@ -11,6 +11,7 @@
     - Emergency email+PIN login available at /emergency route (server-side)
     - AI coaching suggestion (blue ↑ text) now editable alongside reason in Edit note form
     - saveNoteEdit persists improve field to Justifications JSON + dedicated Notes field
+    - Dispute badge in review list now shows pending (D), approved (✓D), or rejected (✗D)
 
   Changelog:
   v2.0.11 (2026-05-19)
@@ -3627,7 +3628,18 @@ Rules:
                           <span style={{fontSize:"12px",fontWeight:600,color:dispTone.text}}>{dispSc?dispSc.pct:(t.aiScore||t.finalScore)}%</span>
                           <div style={{display:"flex",gap:"4px",flexWrap:"wrap"}}>
                             <span style={{fontSize:"10px",fontWeight:700,padding:"1px 6px",borderRadius:"3px",background:dispPassed?T.green.bg:T.red.bg,color:dispPassed?T.green.text:T.red.text,border:"1px solid "+(dispPassed?T.green.border:T.red.border)}}>{dispPassed?"P":"F"}</span>
-                            {hasDisputes&&<span style={{fontSize:"10px",fontWeight:700,padding:"1px 6px",borderRadius:"3px",background:T.amber.bg,color:T.amber.text,border:"1px solid "+T.amber.border}}>D</span>}
+                            {(function(){
+                              if(!t.disputes||!Object.keys(t.disputes).length) return null;
+                              var vals=Object.values(t.disputes);
+                              var hasPending=vals.some(function(d){return d.status==="pending";});
+                              var hasApproved=vals.some(function(d){return d.status==="approved";});
+                              var hasRejected=vals.some(function(d){return d.status==="rejected";});
+                              if(hasPending) return <span style={{fontSize:"10px",fontWeight:700,padding:"1px 6px",borderRadius:"3px",background:T.amber.bg,color:T.amber.text,border:"1px solid "+T.amber.border}}>D</span>;
+                              if(hasApproved&&!hasRejected) return <span style={{fontSize:"10px",fontWeight:700,padding:"1px 6px",borderRadius:"3px",background:T.green.bg,color:T.green.text,border:"1px solid "+T.green.border}}>✓D</span>;
+                              if(hasRejected&&!hasApproved) return <span style={{fontSize:"10px",fontWeight:700,padding:"1px 6px",borderRadius:"3px",background:T.red.bg,color:T.red.text,border:"1px solid "+T.red.border}}>✗D</span>;
+                              if(hasApproved&&hasRejected) return <span style={{fontSize:"10px",fontWeight:700,padding:"1px 6px",borderRadius:"3px",background:T.amber.bg,color:T.amber.text,border:"1px solid "+T.amber.border}}>±D</span>;
+                              return null;
+                            })()}
                           </div>
                           <div>
                             {isReviewed
