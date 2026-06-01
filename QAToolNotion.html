@@ -2,10 +2,23 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.28
+  Version:  2.0.31
   Date:     2026-06-01
 
   Changelog:
+  v2.0.31 (2026-06-01)
+    - Add Cancel button during active fetch — stops after current ticket completes
+    - Uses fetchCancelRef (abort flag) checked at top of both fetch and processing loops
+
+  v2.0.30 (2026-06-01)
+    - Remove arbitrary 2000-ticket safety ceiling on Gorgias pull
+    - Pull is now bounded naturally by date range + max results
+
+  v2.0.29 (2026-06-01)
+    - Fix: Max results now caps final matched tickets, not raw Gorgias pull
+    - Raw Gorgias pull safety ceiling set to 2000 (separate from max results)
+    - Renamed "Max tickets" label to "Max results" for clarity
+
   v2.0.28 (2026-06-01)
     - Notion fetch optimization: server-side filter excludes deleted tickets, sorts DESC, exits early
     - fetchForm.status changed to object {closed,open,pending} checkboxes, all checked by default
@@ -400,7 +413,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.28";
+const APP_VERSION = "v2.0.31";
 const REPORTS_DB_ID = "3684e96c994180db8929c67f306c554a";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
@@ -1152,6 +1165,7 @@ function App() {
     keyword:""
   });
   const [fetchLoading,setFetchLoading]=useState(false);
+  const fetchCancelRef=useRef(false);
   const [fetchStatus,setFetchStatus]=useState("");
   const [fetchedTickets,setFetchedTickets]=useState([]);
   const [fetchError,setFetchError]=useState("");
@@ -2643,6 +2657,7 @@ Rules:
 
   async function fetchGorgiasTickets() {
     setFetchLoading(true); setFetchError(""); setFetchedTickets([]);
+    fetchCancelRef.current = false;
     var f = fetchForm;
     try {
       // Build date params
@@ -2672,6 +2687,7 @@ Rules:
 
       setFetchStatus("Fetching tickets from Gorgias...");
       while(!reachedCutoff) {
+        if(fetchCancelRef.current) { setFetchStatus("Cancelled."); break; }
         var params = { limit: 30 };
         if(cursor) params.cursor = cursor;
         var page = await gorgiasAPI("/tickets", params);
@@ -2698,7 +2714,6 @@ Rules:
             }
           }
           allTickets.push(t);
-          if(allTickets.length >= maxTickets) { reachedCutoff = true; break; }
         }
 
         setFetchStatus("Fetched "+allTickets.length+" tickets...");
@@ -2739,6 +2754,7 @@ Rules:
       console.log("[QA][filter] Field filters — CR L1:", f.crL1||"any", "CR L2:", f.crL2||"any", "Res L1:", f.resL1||"any", "Res L2:", f.resL2||"any", "AddRes L1:", f.addResL1||"any", "AddRes L2:", f.addResL2||"any", "Keyword:", f.keyword||"none", "Msg min:", f.msgMin||"any", "Msg max:", f.msgMax||"any");
 
       for(var i=0; i<allTickets.length; i++) {
+        if(fetchCancelRef.current) { setFetchStatus("Cancelled — "+results.length+" tickets collected."); break; }
         var t = allTickets[i];
         var tid = t.id;
         setFetchStatus("Processing ticket "+(i+1)+" of "+allTickets.length+"... ("+results.length+" matched so far)");
@@ -2839,6 +2855,12 @@ Rules:
         // Tickets per agent cap — counted after all filters so cap means N matching tickets
         if(perAgent && agentName) {
           agentCounts[agentName] = (agentCounts[agentName]||0) + 1;
+        }
+
+        // Max tickets caps final matched results, not the raw pull
+        if(maxTickets && results.length >= maxTickets) {
+          console.log("[QA][filter] Max results reached ("+maxTickets+") — stopping");
+          break;
         }
 
         // Small delay to avoid rate limiting
@@ -4311,7 +4333,7 @@ Rules:
                   style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
               </div>
               <div>
-                <label style={{...lbl,marginBottom:"4px"}}>Max tickets</label>
+                <label style={{...lbl,marginBottom:"4px"}}>Max results</label>
                 <input type="number" placeholder="500" value={fetchForm.maxTickets}
                   onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{maxTickets:e.target.value});});}}
                   style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
@@ -4394,10 +4416,18 @@ Rules:
             {fetchError&&<div style={{padding:"8px 12px",background:"var(--color-background-danger)",border:"0.5px solid var(--color-border-danger)",borderRadius:"var(--border-radius-md)",fontSize:"12px",color:"var(--color-text-danger)",marginBottom:"12px"}}>{fetchError}</div>}
             {fetchStatus&&<div style={{fontSize:"12px",color:"var(--color-text-info)",marginBottom:"10px"}}>{fetchStatus}</div>}
 
-            <button onClick={fetchGorgiasTickets} disabled={fetchLoading}
-              style={{...btnSuccess,padding:"10px 28px",fontSize:"13px",opacity:fetchLoading?0.6:1}}>
-              {fetchLoading?"Fetching...":"Pull Tickets"}
-            </button>
+            <div style={{display:"flex",gap:"10px",alignItems:"center"}}>
+              <button onClick={fetchGorgiasTickets} disabled={fetchLoading}
+                style={{...btnSuccess,padding:"10px 28px",fontSize:"13px",opacity:fetchLoading?0.6:1}}>
+                {fetchLoading?"Fetching...":"Pull Tickets"}
+              </button>
+              {fetchLoading&&(
+                <button onClick={function(){fetchCancelRef.current=true;}}
+                  style={{...ghost,padding:"10px 18px",fontSize:"13px",color:"var(--color-text-danger)",borderColor:"var(--color-border-danger)"}}>
+                  Cancel
+                </button>
+              )}
+            </div>
           </div>
 
           {/* Preview table */}
