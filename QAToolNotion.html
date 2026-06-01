@@ -2,24 +2,27 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.27
+  Version:  2.0.28
   Date:     2026-06-01
 
   Changelog:
+  v2.0.28 (2026-06-01)
+    - Notion fetch optimization: server-side filter excludes deleted tickets, sorts DESC, exits early
+    - fetchForm.status changed to object {closed,open,pending} checkboxes, all checked by default
+    - fetchForm.skip24hrs replaced with skipHours (integer input, default 24)
+    - Date range / Last N days now toggled via radio bullet (dateMode: range | lastN)
+    - Contact Reason L1/L2 fields prepped for dropdown (datalist, values TBD)
+    - Tickets per agent default blank (unlimited)
+    - Channel + Status now checkboxes with separator between them
+    - Debug console.log added for every filter step in fetchGorgiasTickets
+    - Max tickets default raised to 500, skip hours default 24
+
   v2.0.27 (2026-06-01)
     - Fix: saveConfigToNotion splits matrix JSON across chunked keys to avoid 1900-char Notion limit
     - Fix: loadConfigFromNotion reassembles chunked matrix keys
-    - Fix: per-agent cap off-by-one corrected (was capping at N-1)
-    - Fetch tab: add "Skip tickets closed within last 24hrs" checkbox
-    - Fetch tab: advanced filters collapsed by default, cleaner layout
+    - Fix: per-agent cap off-by-one corrected
+    - Fetch tab: add skip N hours filter, collapsible advanced filters, cleaner layout
     - Includes v2.0.26: email login removed, emergency /emergency route, editable AI coaching suggestions, dispute status badges
-
-  v2.0.26 (2026-05-28)
-    - Remove email login from main login screen (Google SSO only)
-    - Emergency email+PIN login available at /emergency route (server-side)
-    - AI coaching suggestion (blue ↑ text) now editable alongside reason in Edit note form
-    - saveNoteEdit persists improve field to Justifications JSON + dedicated Notes field
-    - Dispute badge in review list now shows pending (D), approved (✓D), or rejected (✗D)
 
   v2.0.11 (2026-05-19)
     - My Reports tab now visible to all users
@@ -397,7 +400,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.27";
+const APP_VERSION = "v2.0.28";
 const REPORTS_DB_ID = "3684e96c994180db8929c67f306c554a";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
@@ -528,13 +531,22 @@ async function loadTicketsFromNotion(dbId, onStatus) {
   const pages = [];
   let cursor = undefined, hasMore = true;
   while (hasMore) {
-    const body = { page_size: 100 };
+    const body = {
+      page_size: 100,
+      // Server-side: exclude soft-deleted tickets
+      filter: { property: "Deleted", checkbox: { equals: false } },
+      // Sort newest first so we can exit early on date-bounded loads
+      sorts: [{ property: "Saved At", direction: "descending" }]
+    };
     if (cursor) body.start_cursor = cursor;
     const data = await notionAPI(`/v1/databases/${dbId}/query`, "POST", body);
-    pages.push(...(data.results || []));
+    const results = data.results || [];
+    pages.push(...results);
     hasMore = data.has_more || false;
     cursor = data.next_cursor;
     log("Fetched " + pages.length + " tickets...");
+    // No early-exit cutoff here — load all non-deleted tickets for Review/Dashboard accuracy
+    if (!hasMore) break;
   }
 
   log("Parsing " + pages.length + " tickets");
@@ -1129,13 +1141,14 @@ function App() {
 
   // Fetch Tickets tab
   const [fetchForm,setFetchForm]=useState({
+    dateMode:"lastN",
     fromDate:"",toDate:"",lastDays:"7",
-    status:"closed",
+    status:{closed:true,open:true,pending:true},
     channels:{email:false,chat:false,sms:false,voice:false,api:false},
     agentFilter:"Has agent assigned",
     crL1:"",crL2:"",prodL1:"",resL1:"",resL2:"",addResL1:"",addResL2:"",
     msgMin:"",msgMax:"",
-    ticketsPerAgent:"",maxTickets:"500",skip24hrs:true,
+    ticketsPerAgent:"",maxTickets:"500",skipHours:"24",
     keyword:""
   });
   const [fetchLoading,setFetchLoading]=useState(false);
@@ -2634,20 +2647,27 @@ Rules:
     try {
       // Build date params
       var since = null, until = null;
-      if(f.fromDate && f.toDate) {
+      if(f.dateMode==="range" && f.fromDate) {
         since = f.fromDate+"T00:00:00";
-        until = f.toDate+"T23:59:59";
+        until = f.toDate ? f.toDate+"T23:59:59" : null;
+        console.log("[QA][filter] Date range:", since, "→", until||"no end");
       } else {
         var d = new Date(); d.setDate(d.getDate() - parseInt(f.lastDays||7));
         since = d.toISOString().slice(0,10)+"T00:00:00";
+        console.log("[QA][filter] Last N days:", f.lastDays||7, "→ since", since);
       }
 
-      // Fetch tickets page by page — no server-side date/status filter (Gorgias API limitation)
-      // Date and status filtering done client-side, matching the desktop exporter behavior
+      // Active status filters
+      var activeStatuses = Object.entries(f.status||{}).filter(function(e){return e[1];}).map(function(e){return e[0];});
+      var filterByStatus = activeStatuses.length > 0 && activeStatuses.length < 3;
+      console.log("[QA][filter] Status filter:", filterByStatus ? activeStatuses.join(", ") : "all statuses");
+
       var allTickets = [];
       var cursor = null;
       var maxTickets = parseInt(f.maxTickets||500) || 500;
-      var cutoff24hrs = f.skip24hrs ? new Date(Date.now() - 24*60*60*1000).toISOString().slice(0,19) : null;
+      var skipHrs = parseInt(f.skipHours||"0") || 0;
+      var cutoffSkip = skipHrs > 0 ? new Date(Date.now() - skipHrs*60*60*1000).toISOString().slice(0,19) : null;
+      if(cutoffSkip) console.log("[QA][filter] Skipping tickets closed within last "+skipHrs+"h, cutoff:", cutoffSkip);
       var reachedCutoff = false;
 
       setFetchStatus("Fetching tickets from Gorgias...");
@@ -2661,18 +2681,21 @@ Rules:
         for(var ti=0; ti<data.length; ti++) {
           var t = data[ti];
           var created = (t.created_datetime||"").slice(0,19);
-          // Skip tickets newer than until
           if(until && created && created > until) continue;
-          // Stop once we pass the since cutoff
           if(since && created && created < since) { reachedCutoff = true; break; }
-          // Status filter client-side
-          if(f.status && f.status !== "all") {
-            if((t.status||"").toLowerCase() !== f.status.toLowerCase()) continue;
+          if(filterByStatus) {
+            var tStatus = (t.status||"").toLowerCase();
+            if(!activeStatuses.includes(tStatus)) {
+              console.log("[QA][filter] Skip #"+t.id+" status='"+tStatus+"' not in ["+activeStatuses+"]");
+              continue;
+            }
           }
-          // Skip tickets closed within last 24hrs
-          if(cutoff24hrs && t.closed_datetime) {
+          if(cutoffSkip && t.closed_datetime) {
             var closedAt = (t.closed_datetime||"").slice(0,19);
-            if(closedAt && closedAt > cutoff24hrs) continue;
+            if(closedAt && closedAt > cutoffSkip) {
+              console.log("[QA][filter] Skip #"+t.id+" closed recently ("+closedAt+")");
+              continue;
+            }
           }
           allTickets.push(t);
           if(allTickets.length >= maxTickets) { reachedCutoff = true; break; }
@@ -2682,21 +2705,38 @@ Rules:
         var nextCursor = (page.meta||{}).next_cursor || page.next_cursor;
         if(!nextCursor || reachedCutoff) break;
         cursor = nextCursor;
-        // Small delay between pages
         await new Promise(function(r){setTimeout(r,500);});
       }
+      console.log("[QA][filter] After date+status+skip:", allTickets.length, "tickets");
 
-      // Apply filters
+      // Channel filter
       var channels = Object.entries(f.channels).filter(function(e){return e[1];}).map(function(e){return e[0];});
-      if(channels.length) allTickets = allTickets.filter(function(t){return channels.includes((t.channel||t.via||"").toLowerCase());});
-      if(f.agentFilter==="Has agent assigned") allTickets = allTickets.filter(function(t){return t.assignee_user;});
-      if(f.agentFilter==="No agent assigned") allTickets = allTickets.filter(function(t){return !t.assignee_user;});
+      if(channels.length) {
+        var preCh = allTickets.length;
+        allTickets = allTickets.filter(function(t){return channels.includes((t.channel||t.via||"").toLowerCase());});
+        console.log("[QA][filter] Channel ("+channels.join(",")+"):", preCh, "→", allTickets.length);
+      } else {
+        console.log("[QA][filter] Channel: all (none selected)");
+      }
+
+      // Agent filter
+      if(f.agentFilter==="Has agent assigned") {
+        var preAg = allTickets.length;
+        allTickets = allTickets.filter(function(t){return t.assignee_user;});
+        console.log("[QA][filter] Agent (has agent):", preAg, "→", allTickets.length);
+      } else if(f.agentFilter==="No agent assigned") {
+        var preAg2 = allTickets.length;
+        allTickets = allTickets.filter(function(t){return !t.assignee_user;});
+        console.log("[QA][filter] Agent (no agent):", preAg2, "→", allTickets.length);
+      }
 
       // Fetch messages and build transcripts
       var results = [];
       var perAgent = parseInt(f.ticketsPerAgent||"") || null;
+      if(perAgent) console.log("[QA][filter] Tickets per agent cap:", perAgent);
       var agentCounts = {};
       var FIELD_CR=9969, FIELD_PROD=5807, FIELD_RES=11375, FIELD_ADDRES=11421;
+      console.log("[QA][filter] Field filters — CR L1:", f.crL1||"any", "CR L2:", f.crL2||"any", "Res L1:", f.resL1||"any", "Res L2:", f.resL2||"any", "AddRes L1:", f.addResL1||"any", "AddRes L2:", f.addResL2||"any", "Keyword:", f.keyword||"none", "Msg min:", f.msgMin||"any", "Msg max:", f.msgMax||"any");
 
       for(var i=0; i<allTickets.length; i++) {
         var t = allTickets[i];
@@ -2709,13 +2749,13 @@ Rules:
         var addResParts = parseTicketField(t, FIELD_ADDRES);
 
         // Apply ALL field filters BEFORE fetching messages (avoids unnecessary API calls)
-        if(f.crL1 && crParts[0].toLowerCase() !== f.crL1.toLowerCase()) continue;
-        if(f.crL2 && f.crL2.trim() && crParts[1].toLowerCase() !== f.crL2.trim().toLowerCase()) continue;
-        if(f.prodL1 && prodParts[0].toLowerCase() !== f.prodL1.toLowerCase()) continue;
-        if(f.resL1 && resParts[0].toLowerCase() !== f.resL1.toLowerCase()) continue;
-        if(f.resL2 && f.resL2.trim() && resParts[1].toLowerCase() !== f.resL2.trim().toLowerCase()) continue;
-        if(f.addResL1 && addResParts[0].toLowerCase() !== f.addResL1.toLowerCase()) continue;
-        if(f.addResL2 && f.addResL2.trim() && addResParts[1].toLowerCase() !== f.addResL2.trim().toLowerCase()) continue;
+        if(f.crL1 && crParts[0].toLowerCase() !== f.crL1.toLowerCase()) { console.log("[QA][filter] Skip #"+tid+" CR L1='"+crParts[0]+"' ≠ '"+f.crL1+"'"); continue; }
+        if(f.crL2 && f.crL2.trim() && crParts[1].toLowerCase() !== f.crL2.trim().toLowerCase()) { console.log("[QA][filter] Skip #"+tid+" CR L2='"+crParts[1]+"' ≠ '"+f.crL2+"'"); continue; }
+        if(f.prodL1 && prodParts[0].toLowerCase() !== f.prodL1.toLowerCase()) { console.log("[QA][filter] Skip #"+tid+" Prod='"+prodParts[0]+"' ≠ '"+f.prodL1+"'"); continue; }
+        if(f.resL1 && resParts[0].toLowerCase() !== f.resL1.toLowerCase()) { console.log("[QA][filter] Skip #"+tid+" Res L1='"+resParts[0]+"' ≠ '"+f.resL1+"'"); continue; }
+        if(f.resL2 && f.resL2.trim() && resParts[1].toLowerCase() !== f.resL2.trim().toLowerCase()) { console.log("[QA][filter] Skip #"+tid+" Res L2='"+resParts[1]+"' ≠ '"+f.resL2+"'"); continue; }
+        if(f.addResL1 && addResParts[0].toLowerCase() !== f.addResL1.toLowerCase()) { console.log("[QA][filter] Skip #"+tid+" AddRes L1='"+addResParts[0]+"' ≠ '"+f.addResL1+"'"); continue; }
+        if(f.addResL2 && f.addResL2.trim() && addResParts[1].toLowerCase() !== f.addResL2.trim().toLowerCase()) { console.log("[QA][filter] Skip #"+tid+" AddRes L2='"+addResParts[1]+"' ≠ '"+f.addResL2+"'"); continue; }
 
         var agentName = "";
         if(t.assignee_user) {
@@ -2723,8 +2763,11 @@ Rules:
           agentName = au.name || ((au.firstname||"")+" "+(au.lastname||"")).trim();
         }
 
-        // Skip agent if already at cap (checked before message fetch to save API calls)
-        if(perAgent && agentName && (agentCounts[agentName]||0) >= perAgent) continue;
+        // Skip agent if already at cap
+        if(perAgent && agentName && (agentCounts[agentName]||0) >= perAgent) {
+          console.log("[QA][filter] Skip #"+tid+" — agent '"+agentName+"' at cap ("+perAgent+")");
+          continue;
+        }
 
         // Only fetch messages for tickets that passed ALL field filters
         // This dramatically reduces API calls when using field filters
@@ -2758,8 +2801,8 @@ Rules:
         if(msgFetched && msgCount > 0) {
           var minMsg2 = parseInt(f.msgMin||"")||null;
           var maxMsg2 = parseInt(f.msgMax||"")||null;
-          if(minMsg2 && msgCount < minMsg2) continue;
-          if(maxMsg2 && msgCount > maxMsg2) continue;
+          if(minMsg2 && msgCount < minMsg2) { console.log("[QA][filter] Skip #"+tid+" msgCount="+msgCount+" < min="+minMsg2); continue; }
+          if(maxMsg2 && msgCount > maxMsg2) { console.log("[QA][filter] Skip #"+tid+" msgCount="+msgCount+" > max="+maxMsg2); continue; }
         }
 
         var customerEmail = (t.customer||{}).email || "";
@@ -2770,7 +2813,7 @@ Rules:
           var haystack = (transcript + " " + (t.subject||"")).toLowerCase();
           var kwWords = f.keyword.trim().toLowerCase().split(/\s+/).filter(function(w){return w.length>0;});
           var allMatch = kwWords.every(function(w){return haystack.includes(w);});
-          if(!allMatch) continue;
+          if(!allMatch) { console.log("[QA][filter] Skip #"+tid+" keyword mismatch — looking for ["+kwWords.join(",")+"]"); continue; }
         }
 
         results.push({
@@ -4157,60 +4200,84 @@ Rules:
               </div>
               {!(window.__ENV__&&window.__ENV__.GORGIAS_CONFIGURED)&&(
                 <div style={{fontSize:"12px",color:"var(--color-text-warning)",padding:"6px 12px",background:"var(--color-background-warning)",borderRadius:"var(--border-radius-md)",border:"0.5px solid var(--color-border-warning)"}}>
-                  ⚠ Gorgias not configured
+                  \u26a0 Gorgias not configured
                 </div>
               )}
             </div>
 
-            {/* ── Row 1: Date range */}
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:"12px",marginBottom:"14px"}}>
-              <div>
-                <label style={{...lbl,marginBottom:"4px"}}>From date</label>
-                <input type="date" value={fetchForm.fromDate} onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{fromDate:e.target.value});});}}
-                  style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+            {/* Date range toggle */}
+            <div style={{marginBottom:"14px"}}>
+              <label style={{...lbl,marginBottom:"8px"}}>Date range</label>
+              <div style={{display:"flex",gap:"20px",marginBottom:"10px"}}>
+                <label style={{display:"flex",alignItems:"center",gap:"6px",fontSize:"12px",cursor:"pointer"}}>
+                  <input type="radio" name="dateMode" checked={fetchForm.dateMode==="lastN"}
+                    onChange={function(){setFetchForm(function(f){return Object.assign({},f,{dateMode:"lastN"});});}}/>
+                  Last N days
+                </label>
+                <label style={{display:"flex",alignItems:"center",gap:"6px",fontSize:"12px",cursor:"pointer"}}>
+                  <input type="radio" name="dateMode" checked={fetchForm.dateMode==="range"}
+                    onChange={function(){setFetchForm(function(f){return Object.assign({},f,{dateMode:"range"});});}}/>
+                  Date range
+                </label>
               </div>
-              <div>
-                <label style={{...lbl,marginBottom:"4px"}}>To date</label>
-                <input type="date" value={fetchForm.toDate} onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{toDate:e.target.value});});}}
-                  style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
-              </div>
-              <div>
-                <label style={{...lbl,marginBottom:"4px"}}>Or last N days</label>
-                <input type="number" value={fetchForm.lastDays} placeholder="7"
-                  onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{lastDays:e.target.value});});}}
-                  style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+              {fetchForm.dateMode==="lastN"&&(
+                <div style={{display:"flex",alignItems:"center",gap:"8px"}}>
+                  <input type="number" value={fetchForm.lastDays} placeholder="7" min="1"
+                    onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{lastDays:e.target.value});});}}
+                    style={{width:"80px",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+                  <span style={{fontSize:"12px",color:"var(--color-text-secondary)"}}>days back</span>
+                </div>
+              )}
+              {fetchForm.dateMode==="range"&&(
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:"12px",maxWidth:"400px"}}>
+                  <div>
+                    <label style={{...lbl,marginBottom:"4px"}}>From</label>
+                    <input type="date" value={fetchForm.fromDate}
+                      onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{fromDate:e.target.value});});}}
+                      style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+                  </div>
+                  <div>
+                    <label style={{...lbl,marginBottom:"4px"}}>To</label>
+                    <input type="date" value={fetchForm.toDate}
+                      onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{toDate:e.target.value});});}}
+                      style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Ticket Status checkboxes */}
+            <div style={{marginBottom:"10px"}}>
+              <label style={{...lbl,marginBottom:"6px"}}>Ticket status <span style={{fontWeight:400,textTransform:"none",letterSpacing:0,color:"var(--color-text-secondary)"}}>\u2014 all checked = no filter</span></label>
+              <div style={{display:"flex",gap:"16px"}}>
+                {["closed","open","pending"].map(function(s){
+                  return <label key={s} style={{display:"flex",alignItems:"center",gap:"5px",fontSize:"12px",cursor:"pointer"}}>
+                    <input type="checkbox" checked={fetchForm.status[s]||false}
+                      onChange={function(e){var v=e.target.checked;setFetchForm(function(f){var st=Object.assign({},f.status);st[s]=v;return Object.assign({},f,{status:st});});}}/>
+                    {s.charAt(0).toUpperCase()+s.slice(1)}
+                  </label>;
+                })}
               </div>
             </div>
 
-            {/* ── Row 2: Status + Channel */}
-            <div style={{display:"grid",gridTemplateColumns:"auto 1fr",gap:"24px",alignItems:"start",marginBottom:"14px"}}>
-              <div>
-                <label style={{...lbl,marginBottom:"6px"}}>Ticket status</label>
-                <div style={{display:"flex",gap:"14px"}}>
-                  {["closed","open","pending","all"].map(function(s){
-                    return <label key={s} style={{display:"flex",alignItems:"center",gap:"5px",fontSize:"12px",cursor:"pointer"}}>
-                      <input type="radio" name="fetchStatus" value={s} checked={fetchForm.status===s}
-                        onChange={function(){setFetchForm(function(f){return Object.assign({},f,{status:s});});}}/>
-                      {s.charAt(0).toUpperCase()+s.slice(1)}
-                    </label>;
-                  })}
-                </div>
-              </div>
-              <div>
-                <label style={{...lbl,marginBottom:"6px"}}>Channel <span style={{fontWeight:400,textTransform:"none",letterSpacing:0,color:"var(--color-text-secondary)"}}>— none = all</span></label>
-                <div style={{display:"flex",gap:"14px",flexWrap:"wrap"}}>
-                  {["email","chat","sms","voice","api"].map(function(ch){
-                    return <label key={ch} style={{display:"flex",alignItems:"center",gap:"5px",fontSize:"12px",cursor:"pointer"}}>
-                      <input type="checkbox" checked={fetchForm.channels[ch]||false}
-                        onChange={function(e){var v=e.target.checked;setFetchForm(function(f){var c=Object.assign({},f.channels);c[ch]=v;return Object.assign({},f,{channels:c});});}}/>
-                      {ch.charAt(0).toUpperCase()+ch.slice(1)}
-                    </label>;
-                  })}
-                </div>
+            {/* Separator */}
+            <div style={{borderTop:"0.5px solid var(--color-border-tertiary)",margin:"12px 0"}}/>
+
+            {/* Channel checkboxes */}
+            <div style={{marginBottom:"14px"}}>
+              <label style={{...lbl,marginBottom:"6px"}}>Channel <span style={{fontWeight:400,textTransform:"none",letterSpacing:0,color:"var(--color-text-secondary)"}}>\u2014 none = all</span></label>
+              <div style={{display:"flex",gap:"16px",flexWrap:"wrap"}}>
+                {["email","chat","sms","voice","api"].map(function(ch){
+                  return <label key={ch} style={{display:"flex",alignItems:"center",gap:"5px",fontSize:"12px",cursor:"pointer"}}>
+                    <input type="checkbox" checked={fetchForm.channels[ch]||false}
+                      onChange={function(e){var v=e.target.checked;setFetchForm(function(f){var c=Object.assign({},f.channels);c[ch]=v;return Object.assign({},f,{channels:c});});}}/> 
+                    {ch.charAt(0).toUpperCase()+ch.slice(1)}
+                  </label>;
+                })}
               </div>
             </div>
 
-            {/* ── Row 3: Agent + Contact Reason + Limits */}
+            {/* Agent + CR + Limits */}
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr 1fr",gap:"12px",marginBottom:"14px"}}>
               <div>
                 <label style={{...lbl,marginBottom:"4px"}}>Agent</label>
@@ -4221,19 +4288,25 @@ Rules:
               </div>
               <div>
                 <label style={{...lbl,marginBottom:"4px"}}>Contact Reason L1</label>
-                <input type="text" placeholder="e.g. Order Status" value={fetchForm.crL1}
-                  onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{crL1:e.target.value});});}}
+                <input type="text" list="crL1List" placeholder="e.g. Cancel" value={fetchForm.crL1}
+                  onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{crL1:e.target.value,crL2:""});});}}
                   style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+                <datalist id="crL1List">
+                  {(window.__CR_L1_OPTIONS||[]).map(function(o){return <option key={o} value={o}/>;})}
+                </datalist>
               </div>
               <div>
                 <label style={{...lbl,marginBottom:"4px"}}>Contact Reason L2</label>
-                <input type="text" placeholder="e.g. Subscription (Unaware)" value={fetchForm.crL2}
+                <input type="text" list="crL2List" placeholder="e.g. Subscription (Unaware)" value={fetchForm.crL2}
                   onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{crL2:e.target.value});});}}
                   style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+                <datalist id="crL2List">
+                  {(window.__CR_L2_OPTIONS||{})[fetchForm.crL1]&&(window.__CR_L2_OPTIONS[fetchForm.crL1]||[]).map(function(o){return <option key={o} value={o}/>;})}
+                </datalist>
               </div>
               <div>
                 <label style={{...lbl,marginBottom:"4px"}}>Tickets per agent</label>
-                <input type="number" placeholder="no limit" value={fetchForm.ticketsPerAgent}
+                <input type="number" placeholder="unlimited" value={fetchForm.ticketsPerAgent}
                   onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{ticketsPerAgent:e.target.value});});}}
                   style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
               </div>
@@ -4245,26 +4318,29 @@ Rules:
               </div>
             </div>
 
-            {/* ── Skip 24hrs checkbox */}
-            <div style={{marginBottom:"16px"}}>
-              <label style={{display:"flex",alignItems:"center",gap:"8px",cursor:"pointer",width:"fit-content"}}>
-                <input type="checkbox" checked={fetchForm.skip24hrs}
-                  onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{skip24hrs:e.target.checked});});}}/>
-                <span style={{fontSize:"12px"}}>Skip tickets closed within the last 24 hours</span>
-                <span style={{fontSize:"11px",color:"var(--color-text-secondary)"}}>— avoids scoring tickets still being handled</span>
-              </label>
+            {/* Skip recently closed */}
+            <div style={{marginBottom:"16px",display:"flex",alignItems:"center",gap:"8px"}}>
+              <label style={{...lbl,margin:0}}>Skip tickets closed within last</label>
+              <input type="number" min="0" step="1"
+                value={fetchForm.skipHours}
+                onChange={function(e){
+                  var v=e.target.value.replace(/[^0-9]/g,"");
+                  setFetchForm(function(f){return Object.assign({},f,{skipHours:v});});
+                }}
+                style={{width:"60px",boxSizing:"border-box",fontSize:"12px",padding:"5px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",textAlign:"center"}}/>
+              <span style={{fontSize:"12px",color:"var(--color-text-secondary)"}}>hours <span style={{fontSize:"11px"}}>(0 = disabled)</span></span>
             </div>
 
-            {/* ── Advanced filters (collapsible) */}
+            {/* Advanced filters */}
             <div style={{marginBottom:"16px"}}>
               <button onClick={function(){setShowAdvancedFetch(function(v){return !v;});}}
                 style={{background:"none",border:"none",cursor:"pointer",padding:0,display:"flex",alignItems:"center",gap:"6px",color:"var(--color-text-secondary)",fontSize:"12px"}}>
-                <span style={{fontSize:"10px"}}>{showAdvancedFetch?"▾":"▸"}</span>
-                Advanced filters {(fetchForm.resL1||fetchForm.resL2||fetchForm.addResL1||fetchForm.addResL2||fetchForm.keyword||fetchForm.msgMin||fetchForm.msgMax)&&<span style={{fontSize:"10px",padding:"1px 5px",background:"var(--color-background-info)",color:"var(--color-text-info)",borderRadius:"3px",border:"0.5px solid var(--color-border-info)"}}>active</span>}
+                <span style={{fontSize:"10px"}}>{showAdvancedFetch?"\u25be":"\u25b8"}</span>
+                Advanced filters
+                {(fetchForm.resL1||fetchForm.resL2||fetchForm.addResL1||fetchForm.addResL2||fetchForm.keyword||fetchForm.msgMin||fetchForm.msgMax)&&<span style={{fontSize:"10px",padding:"1px 5px",background:"var(--color-background-info)",color:"var(--color-text-info)",borderRadius:"3px",border:"0.5px solid var(--color-border-info)"}}>active</span>}
               </button>
               {showAdvancedFetch&&(
                 <div style={{marginTop:"12px",padding:"14px",background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)",border:"0.5px solid var(--color-border-tertiary)"}}>
-                  {/* Resolution filters */}
                   <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:"10px",marginBottom:"12px"}}>
                     <div>
                       <label style={{...lbl,marginBottom:"4px"}}>Resolution L1</label>
@@ -4291,10 +4367,9 @@ Rules:
                         style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
                     </div>
                   </div>
-                  {/* Keyword + msg count */}
                   <div style={{display:"grid",gridTemplateColumns:"2fr 1fr 1fr",gap:"10px"}}>
                     <div>
-                      <label style={{...lbl,marginBottom:"4px"}}>Keyword filter <span style={{fontWeight:400,textTransform:"none",letterSpacing:0,color:"var(--color-text-secondary)"}}>— searches transcript + subject (AND logic)</span></label>
+                      <label style={{...lbl,marginBottom:"4px"}}>Keyword <span style={{fontWeight:400,textTransform:"none",letterSpacing:0,color:"var(--color-text-secondary)"}}>\u2014 transcript + subject, AND logic</span></label>
                       <input type="text" placeholder="e.g. explode, refund, damaged" value={fetchForm.keyword}
                         onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{keyword:e.target.value});});}}
                         style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
@@ -4329,11 +4404,11 @@ Rules:
           {fetchedTickets.length>0&&(
             <div style={card}>
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"14px",flexWrap:"wrap",gap:"8px"}}>
-                <p style={{...sectionLabel,margin:0}}>Preview — {fetchedTickets.length} ticket{fetchedTickets.length!==1?"s":""} fetched</p>
+                <p style={{...sectionLabel,margin:0}}>Preview \u2014 {fetchedTickets.length} ticket{fetchedTickets.length!==1?"s":""} fetched</p>
                 <div style={{display:"flex",gap:"8px"}}>
-                  <button onClick={downloadFetchedCSV} style={{...ghost,fontSize:"12px"}}>⬇ Save as CSV</button>
-                  <button onClick={function(){runQAOnFetched(false);}} style={{...btnInfo,fontSize:"12px"}}>▶ Run QA</button>
-                  <button onClick={function(){runQAOnFetched(true);}} style={{...btnSuccess,fontSize:"12px"}}>⬇ CSV + ▶ Run QA</button>
+                  <button onClick={downloadFetchedCSV} style={{...ghost,fontSize:"12px"}}>\u2b07 Save as CSV</button>
+                  <button onClick={function(){runQAOnFetched(false);}} style={{...btnInfo,fontSize:"12px"}}>\u25b6 Run QA</button>
+                  <button onClick={function(){runQAOnFetched(true);}} style={{...btnSuccess,fontSize:"12px"}}>\u2b07 CSV + \u25b6 Run QA</button>
                 </div>
               </div>
               <div style={{overflowX:"auto"}}>
@@ -4349,8 +4424,8 @@ Rules:
                     {fetchedTickets.slice(0,100).map(function(t,i){
                       return <tr key={t.ticket_id} style={{borderBottom:"0.5px solid var(--color-border-tertiary)",background:i%2===0?"transparent":"var(--color-background-secondary)"}}>
                         <td style={{padding:"6px 10px"}}><a href={t.ticket_url} target="_blank" style={{color:"var(--color-text-info)",textDecoration:"none"}}>#{t.ticket_id}</a></td>
-                        <td style={{padding:"6px 10px"}}>{t.agent||"—"}</td>
-                        <td style={{padding:"6px 10px"}}>{t.contact_reason_l1||"—"}{t.contact_reason_l2&&t.contact_reason_l2!=="N/A"&&<span style={{color:"var(--color-text-secondary)"}}>::{t.contact_reason_l2}</span>}</td>
+                        <td style={{padding:"6px 10px"}}>{t.agent||"\u2014"}</td>
+                        <td style={{padding:"6px 10px"}}>{t.contact_reason_l1||"\u2014"}{t.contact_reason_l2&&t.contact_reason_l2!=="N/A"&&<span style={{color:"var(--color-text-secondary)"}}>::{t.contact_reason_l2}</span>}</td>
                         <td style={{padding:"6px 10px"}}>{t.status}</td>
                         <td style={{padding:"6px 10px"}}>{t.initial_channel}</td>
                         <td style={{padding:"6px 10px",whiteSpace:"nowrap"}}>{t.created_date}</td>
@@ -4359,14 +4434,14 @@ Rules:
                     })}
                   </tbody>
                 </table>
-                {fetchedTickets.length>100&&<p style={{fontSize:"11px",color:"var(--color-text-secondary)",textAlign:"center",marginTop:"10px"}}>Showing first 100 of {fetchedTickets.length} — all will be included in CSV / QA run</p>}
+                {fetchedTickets.length>100&&<p style={{fontSize:"11px",color:"var(--color-text-secondary)",textAlign:"center",marginTop:"10px"}}>Showing first 100 of {fetchedTickets.length} \u2014 all will be included in CSV / QA run</p>}
               </div>
             </div>
           )}
         </div>
       )}
 
-            {/* ── MANUAL AUDIT TAB ── */}
+                        {/* ── MANUAL AUDIT TAB ── */}
       {view==="manual"&&isEditor&&(
         <div>
           <div style={{...card,marginBottom:"16px"}}>

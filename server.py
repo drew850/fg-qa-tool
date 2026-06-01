@@ -136,7 +136,81 @@ def render_emergency(error=None, status=200):
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
+CR_L1_OPTIONS = [
+    "Cancel",
+    "Order Issue",
+    "Order Status",
+    "Other",
+    "Subscription",
+    "Troubleshooting",
+    "Update Order"
+]
+
+CR_L2_OPTIONS = {
+    "Cancel": [
+        "Cancel 1st Product Order",
+        "Subscription (Aware)",
+        "Subscription (Unaware)",
+        "Subscription Aware",
+        "Subscription Order",
+        "Subscription Unaware"
+    ],
+    "Order Issue": [
+        "CX Wrong Item / Order",
+        "FB Wrong Item / Order",
+        "Missing Item From Kit",
+        "Missing Item From Order",
+        "Package Damaged / Damaged Upon Arrival",
+        "Received Unsatisfactory Product",
+        "Received Used Product",
+        "Return Request"
+    ],
+    "Order Status": [
+        "Delays, but Not Lost",
+        "Delivered, Not Received",
+        "International (Delays, but Not Lost)",
+        "International (No Delays)",
+        "Lost in Transit",
+        "Never Shipped",
+        "No Delays",
+        "Returned to Sender",
+        "Wrong Address"
+    ],
+    "Other": [
+        "General Order Question",
+        "General Product Question",
+        "Influencer/Job Inquiry",
+        "Negative Feedback",
+        "Other",
+        "Payment/Charge Issues",
+        "Positive Feedback",
+        "Promo Request/Issue",
+        "Social General/Tagging",
+        "System Notification",
+        "Update Account",
+        "Wholesale"
+    ],
+    "Subscription": [
+        "Change Address",
+        "Change Frequency",
+        "Change Product",
+        "Skip Order"
+    ],
+    "Troubleshooting": [
+        "Broken Blade / Attachment",
+        "Never worked (new device)",
+        "Stopped Working",
+        "Will Not Charge",
+        "Won't turn OFF"
+    ],
+    "Update Order": [
+        "Add / Remove / Change Item",
+        "Change Address"
+    ]
+}
+
 def inject_env(html: bytes) -> bytes:
+    import json as _json
     snippet = (
         f'<script>window.__ENV__={{'
         f'NOTION_TOKEN:"{NOTION_TOKEN}",'
@@ -145,7 +219,10 @@ def inject_env(html: bytes) -> bytes:
         f'BASE_URL:"{BASE_URL}",'
         f'GORGIAS_DOMAIN:"{GORGIAS_DOMAIN}",'
         f'GORGIAS_CONFIGURED:{"true" if GORGIAS_USERNAME and GORGIAS_API_KEY else "false"}'
-        f'}};</script>'
+        f'}};'
+        f'window.__CR_L1_OPTIONS={_json.dumps(CR_L1_OPTIONS)};'
+        f'window.__CR_L2_OPTIONS={_json.dumps(CR_L2_OPTIONS)};'
+        f'</script>'
     )
     return html.replace(b"</head>", snippet.encode() + b"</head>", 1)
 
