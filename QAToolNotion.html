@@ -2,10 +2,18 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.26
-  Date:     2026-05-28
+  Version:  2.0.27
+  Date:     2026-06-01
 
   Changelog:
+  v2.0.27 (2026-06-01)
+    - Fix: saveConfigToNotion splits matrix JSON across chunked keys to avoid 1900-char Notion limit
+    - Fix: loadConfigFromNotion reassembles chunked matrix keys
+    - Fix: per-agent cap off-by-one corrected (was capping at N-1)
+    - Fetch tab: add "Skip tickets closed within last 24hrs" checkbox
+    - Fetch tab: advanced filters collapsed by default, cleaner layout
+    - Includes v2.0.26: email login removed, emergency /emergency route, editable AI coaching suggestions, dispute status badges
+
   v2.0.26 (2026-05-28)
     - Remove email login from main login screen (Google SSO only)
     - Emergency email+PIN login available at /emergency route (server-side)
@@ -13,7 +21,6 @@
     - saveNoteEdit persists improve field to Justifications JSON + dedicated Notes field
     - Dispute badge in review list now shows pending (D), approved (✓D), or rejected (✗D)
 
-  Changelog:
   v2.0.11 (2026-05-19)
     - My Reports tab now visible to all users
     - Edit+ users see all agent reports with agent name shown
@@ -390,7 +397,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.26";
+const APP_VERSION = "v2.0.27";
 const REPORTS_DB_ID = "3684e96c994180db8929c67f306c554a";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
@@ -564,30 +571,61 @@ async function loadTicketsFromNotion(dbId, onStatus) {
 
 async function loadConfigFromNotion(dbId, key) {
   try {
-    const data = await notionAPI(`/v1/databases/${dbId}/query`, "POST", {
-      filter: { property: "Key", rich_text: { equals: key } }, page_size: 1
+    // Load base key
+    const data = await notionAPI(`/v1/databases/${dbId}/query`,"POST",{
+      filter:{property:"Key",rich_text:{equals:key}},page_size:1
     });
     const page = data.results?.[0];
-    if (!page) return null;
-    const val = getProp(page, "Value") || "";
-    return val ? JSON.parse(val) : null;
-  } catch(e) { console.error("[QA] loadConfig:", e); return null; }
+    if(!page) return null;
+    let val = getProp(page,"Value")||"";
+    if(!val) return null;
+    // Check for additional chunks (key__1, key__2, ...)
+    for(let ci=1; ci<10; ci++) {
+      const chunkKey = key+"__"+ci;
+      const chunkData = await notionAPI(`/v1/databases/${dbId}/query`,"POST",{
+        filter:{property:"Key",rich_text:{equals:chunkKey}},page_size:1
+      });
+      const chunkPage = chunkData.results?.[0];
+      if(!chunkPage) break;
+      val += getProp(chunkPage,"Value")||"";
+    }
+    return JSON.parse(val);
+  } catch(e) { console.error("[QA] loadConfig:",e); return null; }
 }
 
 async function saveConfigToNotion(dbId, key, value) {
-  const json = JSON.stringify(value).slice(0, 1900);
-  const find = await notionAPI(`/v1/databases/${dbId}/query`, "POST", {
-    filter: { property: "Key", rich_text: { equals: key } }, page_size: 1
-  });
-  const existing = find.results?.[0];
-  const props = {
-    "Key":   { title: [{ text: { content: key } }] },
-    "Value": { rich_text: [{ text: { content: json } }] }
-  };
-  if (existing) {
-    await notionAPI(`/v1/pages/${existing.id}`, "PATCH", { properties: props });
-  } else {
-    await notionAPI("/v1/pages", "POST", { parent: { database_id: dbId }, properties: props });
+  const fullJson = JSON.stringify(value);
+  const CHUNK = 1900;
+  // Split into chunks — each stored as key, key__1, key__2, etc.
+  const chunks = [];
+  for(let i=0; i<fullJson.length; i+=CHUNK) chunks.push(fullJson.slice(i,i+CHUNK));
+  // If only one chunk, store as plain key (backwards compatible)
+  const keys = chunks.length===1 ? [key] : chunks.map(function(_,i){return i===0?key:key+"__"+i;});
+  for(let ci=0; ci<chunks.length; ci++) {
+    const k = keys[ci];
+    const find = await notionAPI(`/v1/databases/${dbId}/query`,"POST",{
+      filter:{property:"Key",rich_text:{equals:k}},page_size:1
+    });
+    const existing = find.results?.[0];
+    const props = {
+      "Key":   {title:[{text:{content:k}}]},
+      "Value": {rich_text:[{text:{content:chunks[ci]}}]}
+    };
+    if(existing) {
+      await notionAPI(`/v1/pages/${existing.id}`,"PATCH",{properties:props});
+    } else {
+      await notionAPI("/v1/pages","POST",{parent:{database_id:dbId},properties:props});
+    }
+  }
+  // Clean up any stale extra chunks from a previous longer save
+  for(let si=chunks.length; si<10; si++) {
+    const staleKey = key+"__"+si;
+    const find = await notionAPI(`/v1/databases/${dbId}/query`,"POST",{
+      filter:{property:"Key",rich_text:{equals:staleKey}},page_size:1
+    });
+    const stale = find.results?.[0];
+    if(!stale) break;
+    await notionAPI(`/v1/pages/${stale.id}`,"PATCH",{archived:true});
   }
 }
 
@@ -1097,13 +1135,14 @@ function App() {
     agentFilter:"Has agent assigned",
     crL1:"",crL2:"",prodL1:"",resL1:"",resL2:"",addResL1:"",addResL2:"",
     msgMin:"",msgMax:"",
-    ticketsPerAgent:"",maxTickets:"500",
+    ticketsPerAgent:"",maxTickets:"500",skip24hrs:true,
     keyword:""
   });
   const [fetchLoading,setFetchLoading]=useState(false);
   const [fetchStatus,setFetchStatus]=useState("");
   const [fetchedTickets,setFetchedTickets]=useState([]);
   const [fetchError,setFetchError]=useState("");
+  const [showAdvancedFetch,setShowAdvancedFetch]=useState(false);
 
   // Manual Audit tab
   const [manualForm,setManualForm]=useState({ticketId:"",agentName:"",contactReason:"",ticketUrl:"",customerEmail:"",week:"",transcript:""});
@@ -1118,7 +1157,7 @@ function App() {
   const [agentEditValue,setAgentEditValue]=useState("");
   const [savingAgent,setSavingAgent]=useState(false);
   // #10 Note editing
-  const [editingNote,setEditingNote]=useState(null); // {ticketId, field} or null
+  const [editingNote,setEditingNote]=useState(null);
   const [noteEditValue,setNoteEditValue]=useState("");
   const [noteImproveValue,setNoteImproveValue]=useState("");
   const [savingNote,setSavingNote]=useState(false);
@@ -2299,28 +2338,22 @@ Rules:
       var notionField = catNoteFieldMap[catId];
       var now = new Date().toISOString();
       var currentNote = (ticket.justifications&&ticket.justifications[catId]&&ticket.justifications[catId].reason)||"";
-      // Load existing history
       var historyRaw = ticket.notesHistoryJSON||"{}";
       var history = {};
       try { history = JSON.parse(historyRaw); } catch(e){}
       if(!history[catId]) history[catId]=[];
-      // Add original AI note if this is first edit
       if(history[catId].length===0&&currentNote) {
         history[catId].push({by:"AI",at:ticket.savedAt||"",content:currentNote});
       }
-      // Add new edit
       history[catId].push({by:currentUser.name,at:now,content:noteEditValue.trim()});
-      // Keep max 5 versions per category
       if(history[catId].length>5) history[catId]=history[catId].slice(-5);
       var historyStr = JSON.stringify(history).slice(0,1990);
-      // Build formatted notes field value (reason + improve if set)
       var improveVal = noteImproveValue.trim()||null;
       var formattedNote = noteEditValue.trim();
       if(improveVal) formattedNote += " | \u2191 " + improveVal;
       var patch = {};
       patch[notionField] = {rich_text:[{text:{content:formattedNote.slice(0,1990)}}]};
       patch["Notes History JSON"] = {rich_text:[{text:{content:historyStr}}]};
-      // Also update Justifications JSON with new improve value
       var currentJustJSON = ticket.justificationsJSON||"{}";
       var justObj = {};
       try { justObj = JSON.parse(currentJustJSON.replace(/'/g,'"')); } catch(e){}
@@ -2330,7 +2363,6 @@ Rules:
       justObj[catId].edited = true;
       patch["Justifications JSON"] = {rich_text:[{text:{content:JSON.stringify(justObj).slice(0,1990)}}]};
       await notionAPI("/v1/pages/"+ticket.notionPageId,"PATCH",{properties:patch});
-      // Update local state
       setTickets(function(ts){return ts.map(function(t){
         if(t.notionPageId!==ticket.notionPageId) return t;
         var newJust=Object.assign({},t.justifications);
@@ -2615,6 +2647,7 @@ Rules:
       var allTickets = [];
       var cursor = null;
       var maxTickets = parseInt(f.maxTickets||500) || 500;
+      var cutoff24hrs = f.skip24hrs ? new Date(Date.now() - 24*60*60*1000).toISOString().slice(0,19) : null;
       var reachedCutoff = false;
 
       setFetchStatus("Fetching tickets from Gorgias...");
@@ -2635,6 +2668,11 @@ Rules:
           // Status filter client-side
           if(f.status && f.status !== "all") {
             if((t.status||"").toLowerCase() !== f.status.toLowerCase()) continue;
+          }
+          // Skip tickets closed within last 24hrs
+          if(cutoff24hrs && t.closed_datetime) {
+            var closedAt = (t.closed_datetime||"").slice(0,19);
+            if(closedAt && closedAt > cutoff24hrs) continue;
           }
           allTickets.push(t);
           if(allTickets.length >= maxTickets) { reachedCutoff = true; break; }
@@ -2685,8 +2723,8 @@ Rules:
           agentName = au.name || ((au.firstname||"")+" "+(au.lastname||"")).trim();
         }
 
-        // Skip agent if already at cap
-        if(perAgent && agentName && (agentCounts[agentName]||0) > perAgent) continue;
+        // Skip agent if already at cap (checked before message fetch to save API calls)
+        if(perAgent && agentName && (agentCounts[agentName]||0) >= perAgent) continue;
 
         // Only fetch messages for tickets that passed ALL field filters
         // This dramatically reduces API calls when using field filters
@@ -2758,10 +2796,6 @@ Rules:
         // Tickets per agent cap — counted after all filters so cap means N matching tickets
         if(perAgent && agentName) {
           agentCounts[agentName] = (agentCounts[agentName]||0) + 1;
-          if(agentCounts[agentName] >= perAgent) {
-            // Remove this agent from future processing by marking as capped
-            agentCounts[agentName] = perAgent + 999;
-          }
         }
 
         // Small delay to avoid rate limiting
@@ -4114,19 +4148,21 @@ Rules:
       {view==="fetch"&&isEditor&&(
         <div>
           <div style={{...card,marginBottom:"16px"}}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"14px"}}>
+
+            {/* Header */}
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:"18px"}}>
               <div>
                 <p style={{margin:"0 0 2px",fontSize:"15px",fontWeight:600}}>Fetch Tickets from Gorgias</p>
-                <p style={{margin:0,fontSize:"12px",color:"var(--color-text-secondary)"}}>Pull tickets directly from Gorgias, preview them, then save as CSV or run QA.</p>
+                <p style={{margin:0,fontSize:"12px",color:"var(--color-text-secondary)"}}>Pull tickets from Gorgias, preview, then save as CSV or run QA.</p>
               </div>
               {!(window.__ENV__&&window.__ENV__.GORGIAS_CONFIGURED)&&(
                 <div style={{fontSize:"12px",color:"var(--color-text-warning)",padding:"6px 12px",background:"var(--color-background-warning)",borderRadius:"var(--border-radius-md)",border:"0.5px solid var(--color-border-warning)"}}>
-                  ⚠ Gorgias credentials not configured in Railway
+                  ⚠ Gorgias not configured
                 </div>
               )}
             </div>
 
-            {/* Date range */}
+            {/* ── Row 1: Date range */}
             <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:"12px",marginBottom:"14px"}}>
               <div>
                 <label style={{...lbl,marginBottom:"4px"}}>From date</label>
@@ -4146,39 +4182,38 @@ Rules:
               </div>
             </div>
 
-            {/* Status */}
-            <div style={{marginBottom:"14px"}}>
-              <label style={{...lbl,marginBottom:"6px"}}>Ticket status</label>
-              <div style={{display:"flex",gap:"16px"}}>
-                {["closed","open","pending","all"].map(function(s){
-                  return <label key={s} style={{display:"flex",alignItems:"center",gap:"5px",fontSize:"12px",cursor:"pointer"}}>
-                    <input type="radio" name="fetchStatus" value={s} checked={fetchForm.status===s}
-                      onChange={function(){setFetchForm(function(f){return Object.assign({},f,{status:s});});}}/>
-                    {s.charAt(0).toUpperCase()+s.slice(1)}
-                  </label>;
-                })}
-              </div>
-            </div>
-
-            {/* Channels */}
-            <div style={{marginBottom:"14px"}}>
-              <label style={{...lbl,marginBottom:"6px"}}>Initial channel</label>
-              <div style={{display:"flex",gap:"16px",flexWrap:"wrap"}}>
-                {["email","chat","sms","voice","api"].map(function(ch){
-                  return <label key={ch} style={{display:"flex",alignItems:"center",gap:"5px",fontSize:"12px",cursor:"pointer"}}>
-                    <input type="checkbox" checked={fetchForm.channels[ch]||false}
-                      onChange={function(e){var v=e.target.checked;setFetchForm(function(f){var c=Object.assign({},f.channels);c[ch]=v;return Object.assign({},f,{channels:c});});}}/>
-                    {ch.charAt(0).toUpperCase()+ch.slice(1)}
-                  </label>;
-                })}
-                <span style={{fontSize:"11px",color:"var(--color-text-secondary)",alignSelf:"center"}}>(none checked = all)</span>
-              </div>
-            </div>
-
-            {/* Agent + text filters */}
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:"12px",marginBottom:"10px"}}>
+            {/* ── Row 2: Status + Channel */}
+            <div style={{display:"grid",gridTemplateColumns:"auto 1fr",gap:"24px",alignItems:"start",marginBottom:"14px"}}>
               <div>
-                <label style={{...lbl,marginBottom:"4px"}}>Agent assignment</label>
+                <label style={{...lbl,marginBottom:"6px"}}>Ticket status</label>
+                <div style={{display:"flex",gap:"14px"}}>
+                  {["closed","open","pending","all"].map(function(s){
+                    return <label key={s} style={{display:"flex",alignItems:"center",gap:"5px",fontSize:"12px",cursor:"pointer"}}>
+                      <input type="radio" name="fetchStatus" value={s} checked={fetchForm.status===s}
+                        onChange={function(){setFetchForm(function(f){return Object.assign({},f,{status:s});});}}/>
+                      {s.charAt(0).toUpperCase()+s.slice(1)}
+                    </label>;
+                  })}
+                </div>
+              </div>
+              <div>
+                <label style={{...lbl,marginBottom:"6px"}}>Channel <span style={{fontWeight:400,textTransform:"none",letterSpacing:0,color:"var(--color-text-secondary)"}}>— none = all</span></label>
+                <div style={{display:"flex",gap:"14px",flexWrap:"wrap"}}>
+                  {["email","chat","sms","voice","api"].map(function(ch){
+                    return <label key={ch} style={{display:"flex",alignItems:"center",gap:"5px",fontSize:"12px",cursor:"pointer"}}>
+                      <input type="checkbox" checked={fetchForm.channels[ch]||false}
+                        onChange={function(e){var v=e.target.checked;setFetchForm(function(f){var c=Object.assign({},f.channels);c[ch]=v;return Object.assign({},f,{channels:c});});}}/>
+                      {ch.charAt(0).toUpperCase()+ch.slice(1)}
+                    </label>;
+                  })}
+                </div>
+              </div>
+            </div>
+
+            {/* ── Row 3: Agent + Contact Reason + Limits */}
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr 1fr",gap:"12px",marginBottom:"14px"}}>
+              <div>
+                <label style={{...lbl,marginBottom:"4px"}}>Agent</label>
                 <select value={fetchForm.agentFilter} onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{agentFilter:e.target.value});});}}
                   style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}>
                   {["All tickets","Has agent assigned","No agent assigned"].map(function(o){return <option key={o} value={o}>{o}</option>;})}
@@ -4192,63 +4227,13 @@ Rules:
               </div>
               <div>
                 <label style={{...lbl,marginBottom:"4px"}}>Contact Reason L2</label>
-                <input type="text" placeholder="e.g. Delivered, Not Received" value={fetchForm.crL2}
+                <input type="text" placeholder="e.g. Subscription (Unaware)" value={fetchForm.crL2}
                   onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{crL2:e.target.value});});}}
-                  style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
-              </div>
-            </div>
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:"12px",marginBottom:"14px"}}>
-              <div>
-                <label style={{...lbl,marginBottom:"4px"}}>Ticket Resolution L1</label>
-                <input type="text" placeholder="e.g. Refund Issued" value={fetchForm.resL1}
-                  onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{resL1:e.target.value});});}}
-                  style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
-              </div>
-              <div>
-                <label style={{...lbl,marginBottom:"4px"}}>Ticket Resolution L2</label>
-                <input type="text" placeholder="e.g. Full Refund" value={fetchForm.resL2}
-                  onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{resL2:e.target.value});});}}
-                  style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
-              </div>
-              <div>
-                <label style={{...lbl,marginBottom:"4px"}}>Add. Resolution L1</label>
-                <input type="text" placeholder="e.g. Replacement" value={fetchForm.addResL1}
-                  onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{addResL1:e.target.value});});}}
-                  style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
-              </div>
-              <div>
-                <label style={{...lbl,marginBottom:"4px"}}>Add. Resolution L2</label>
-                <input type="text" placeholder="e.g. Blade Refill" value={fetchForm.addResL2}
-                  onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{addResL2:e.target.value});});}}
-                  style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
-              </div>
-            </div>
-
-            {/* Keyword filter */}
-            <div style={{marginBottom:"14px"}}>
-              <label style={{...lbl,marginBottom:"4px"}}>Keyword filter <span style={{fontWeight:400,textTransform:"none",letterSpacing:0,color:"var(--color-text-secondary)"}}>— optional, searches transcript + subject</span></label>
-              <input type="text" placeholder="e.g. explode, refund, damaged..." value={fetchForm.keyword}
-                onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{keyword:e.target.value});});}}
-                style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
-            </div>
-
-            {/* Counts */}
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:"12px",marginBottom:"16px"}}>
-              <div>
-                <label style={{...lbl,marginBottom:"4px"}}>Msg count min</label>
-                <input type="number" placeholder="blank = any" value={fetchForm.msgMin}
-                  onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{msgMin:e.target.value});});}}
-                  style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
-              </div>
-              <div>
-                <label style={{...lbl,marginBottom:"4px"}}>Msg count max</label>
-                <input type="number" placeholder="blank = any" value={fetchForm.msgMax}
-                  onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{msgMax:e.target.value});});}}
                   style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
               </div>
               <div>
                 <label style={{...lbl,marginBottom:"4px"}}>Tickets per agent</label>
-                <input type="number" placeholder="blank = no limit" value={fetchForm.ticketsPerAgent}
+                <input type="number" placeholder="no limit" value={fetchForm.ticketsPerAgent}
                   onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{ticketsPerAgent:e.target.value});});}}
                   style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
               </div>
@@ -4258,6 +4243,77 @@ Rules:
                   onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{maxTickets:e.target.value});});}}
                   style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
               </div>
+            </div>
+
+            {/* ── Skip 24hrs checkbox */}
+            <div style={{marginBottom:"16px"}}>
+              <label style={{display:"flex",alignItems:"center",gap:"8px",cursor:"pointer",width:"fit-content"}}>
+                <input type="checkbox" checked={fetchForm.skip24hrs}
+                  onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{skip24hrs:e.target.checked});});}}/>
+                <span style={{fontSize:"12px"}}>Skip tickets closed within the last 24 hours</span>
+                <span style={{fontSize:"11px",color:"var(--color-text-secondary)"}}>— avoids scoring tickets still being handled</span>
+              </label>
+            </div>
+
+            {/* ── Advanced filters (collapsible) */}
+            <div style={{marginBottom:"16px"}}>
+              <button onClick={function(){setShowAdvancedFetch(function(v){return !v;});}}
+                style={{background:"none",border:"none",cursor:"pointer",padding:0,display:"flex",alignItems:"center",gap:"6px",color:"var(--color-text-secondary)",fontSize:"12px"}}>
+                <span style={{fontSize:"10px"}}>{showAdvancedFetch?"▾":"▸"}</span>
+                Advanced filters {(fetchForm.resL1||fetchForm.resL2||fetchForm.addResL1||fetchForm.addResL2||fetchForm.keyword||fetchForm.msgMin||fetchForm.msgMax)&&<span style={{fontSize:"10px",padding:"1px 5px",background:"var(--color-background-info)",color:"var(--color-text-info)",borderRadius:"3px",border:"0.5px solid var(--color-border-info)"}}>active</span>}
+              </button>
+              {showAdvancedFetch&&(
+                <div style={{marginTop:"12px",padding:"14px",background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)",border:"0.5px solid var(--color-border-tertiary)"}}>
+                  {/* Resolution filters */}
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:"10px",marginBottom:"12px"}}>
+                    <div>
+                      <label style={{...lbl,marginBottom:"4px"}}>Resolution L1</label>
+                      <input type="text" placeholder="e.g. Refund Issued" value={fetchForm.resL1}
+                        onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{resL1:e.target.value});});}}
+                        style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+                    </div>
+                    <div>
+                      <label style={{...lbl,marginBottom:"4px"}}>Resolution L2</label>
+                      <input type="text" placeholder="e.g. Full Refund" value={fetchForm.resL2}
+                        onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{resL2:e.target.value});});}}
+                        style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+                    </div>
+                    <div>
+                      <label style={{...lbl,marginBottom:"4px"}}>Add. Resolution L1</label>
+                      <input type="text" placeholder="e.g. Replacement" value={fetchForm.addResL1}
+                        onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{addResL1:e.target.value});});}}
+                        style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+                    </div>
+                    <div>
+                      <label style={{...lbl,marginBottom:"4px"}}>Add. Resolution L2</label>
+                      <input type="text" placeholder="e.g. Blade Refill" value={fetchForm.addResL2}
+                        onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{addResL2:e.target.value});});}}
+                        style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+                    </div>
+                  </div>
+                  {/* Keyword + msg count */}
+                  <div style={{display:"grid",gridTemplateColumns:"2fr 1fr 1fr",gap:"10px"}}>
+                    <div>
+                      <label style={{...lbl,marginBottom:"4px"}}>Keyword filter <span style={{fontWeight:400,textTransform:"none",letterSpacing:0,color:"var(--color-text-secondary)"}}>— searches transcript + subject (AND logic)</span></label>
+                      <input type="text" placeholder="e.g. explode, refund, damaged" value={fetchForm.keyword}
+                        onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{keyword:e.target.value});});}}
+                        style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+                    </div>
+                    <div>
+                      <label style={{...lbl,marginBottom:"4px"}}>Msg count min</label>
+                      <input type="number" placeholder="any" value={fetchForm.msgMin}
+                        onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{msgMin:e.target.value});});}}
+                        style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+                    </div>
+                    <div>
+                      <label style={{...lbl,marginBottom:"4px"}}>Msg count max</label>
+                      <input type="number" placeholder="any" value={fetchForm.msgMax}
+                        onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{msgMax:e.target.value});});}}
+                        style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
 
             {fetchError&&<div style={{padding:"8px 12px",background:"var(--color-background-danger)",border:"0.5px solid var(--color-border-danger)",borderRadius:"var(--border-radius-md)",fontSize:"12px",color:"var(--color-text-danger)",marginBottom:"12px"}}>{fetchError}</div>}
