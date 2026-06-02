@@ -2,10 +2,16 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.33
+  Version:  2.0.34
   Date:     2026-06-02
 
   Changelog:
+  v2.0.34 (2026-06-02)
+    - Fix: Remove created_datetime_start/end params — Gorgias returns 400, not supported
+    - Fix: Remove 500ms delay from page fetch loop — was causing 2min+ waits on historical pulls
+    - 500ms delay kept only on per-ticket message fetches where rate limiting is needed
+    - Date filtering remains client-side; early exit still fires when tickets pass the since cutoff
+
   v2.0.33 (2026-06-02)
     - Fix: raw unicode escapes (\u2014 etc) now render as actual characters
     - Add filter summary panel showing per-filter skip counts after each fetch
@@ -423,7 +429,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.33";
+const APP_VERSION = "v2.0.34";
 const REPORTS_DB_ID = "3684e96c994180db8929c67f306c554a";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
@@ -2705,14 +2711,11 @@ Rules:
       };
 
       setFetchStatus("Fetching tickets from Gorgias...");
-      console.log("[QA][fetch] Sending date params to Gorgias — start:", since, "end:", until||"none");
+      console.log("[QA][fetch] Date filter (client-side) — start:", since, "end:", until||"none");
       while(!reachedCutoff) {
         if(fetchCancelRef.current) { setFetchStatus("Cancelled."); break; }
         var params = { limit: 30 };
         if(cursor) params.cursor = cursor;
-        // Server-side date filter — avoids burning through pages of out-of-range tickets
-        if(since) params.created_datetime_start = since;
-        if(until) params.created_datetime_end = until;
         var page = await gorgiasAPI("/tickets", params);
         var data = page.data || [];
         if(!data.length) break;
@@ -2744,7 +2747,6 @@ Rules:
         var nextCursor = (page.meta||{}).next_cursor || page.next_cursor;
         if(!nextCursor || reachedCutoff) break;
         cursor = nextCursor;
-        await new Promise(function(r){setTimeout(r,500);});
       }
       console.log("[QA][filter] After date+status+skip:", allTickets.length, "tickets");
 
