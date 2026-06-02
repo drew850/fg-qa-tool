@@ -2,10 +2,14 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.34
+  Version:  2.0.35
   Date:     2026-06-02
 
   Changelog:
+  v2.0.35 (2026-06-02)
+    - Fix: Add 100ms delay between Gorgias page fetches — zero delay caused ERR_CONNECTION_RESET
+    - 100ms is fast enough to avoid 2min freeze, slow enough to not get dropped by Gorgias
+
   v2.0.34 (2026-06-02)
     - Fix: Remove created_datetime_start/end params — Gorgias returns 400, not supported
     - Fix: Remove 500ms delay from page fetch loop — was causing 2min+ waits on historical pulls
@@ -429,7 +433,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.34";
+const APP_VERSION = "v2.0.35";
 const REPORTS_DB_ID = "3684e96c994180db8929c67f306c554a";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
@@ -2747,6 +2751,7 @@ Rules:
         var nextCursor = (page.meta||{}).next_cursor || page.next_cursor;
         if(!nextCursor || reachedCutoff) break;
         cursor = nextCursor;
+        await new Promise(function(r){setTimeout(r,100);}); // small delay to avoid Gorgias connection resets
       }
       console.log("[QA][filter] After date+status+skip:", allTickets.length, "tickets");
 
