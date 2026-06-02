@@ -2,10 +2,27 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.37
-  Date:     2026-06-02
+  Version:  2.0.40
+  Date:     2026-06-03
 
   Changelog:
+  v2.0.40 (2026-06-03)
+    - Update logo SVG to match ChatGPT-generated Wingman mark
+    - Swept-wing paths with feather detail, thin stem, dot — matches actual logo asset
+    - Background updated to deeper navy #0D1B3E matching logo
+
+  v2.0.39 (2026-06-02)
+    - Rebrand: Freedom Grooming QA → Wingman by Freebird CX
+    - Wingman logo mark (W-wings SVG) in login screen and header
+    - Brand colors updated: navy #1565C0 primary, teal #00C49A success, blue #1565C0 info
+    - Page title updated to Wingman — by Freebird CX
+    - Report footers updated to Wingman branding
+    - AI prompts retain Freedom Grooming business context (not a brand reference)
+
+  v2.0.38 (2026-06-02)
+    - Fix: Add "Respond in English only" to all AI prompts (insights, scoring, evaluator)
+    - Prevents Claude Sonnet code-switching to other languages mid-generation
+
   v2.0.37 (2026-06-02)
     - Deleted/archived tickets now skipped in fetcher and batch QA
     - loadAllData fetches deleted ticket IDs from Notion on startup (Deleted=true filter)
@@ -400,7 +417,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Freedom Grooming QA</title>
+  <title>Wingman — by Freebird CX</title>
   <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -413,21 +430,21 @@
     code{font-family:monospace;font-size:12px;background:#f3f4f6;padding:1px 5px;border-radius:3px}
     :root{
       --color-background-primary:#fff;
-      --color-background-secondary:#f3f4f6;
-      --color-background-info:#eff6ff;
-      --color-background-success:#f0fdf4;
+      --color-background-secondary:#f4f6f8;
+      --color-background-info:#e8f0fb;
+      --color-background-success:#e6f7f3;
       --color-background-warning:#fffbeb;
       --color-background-danger:#fef2f2;
-      --color-text-primary:#111827;
+      --color-text-primary:#1a1a2e;
       --color-text-secondary:#6b7280;
-      --color-text-info:#1d4ed8;
-      --color-text-success:#166534;
+      --color-text-info:#1565C0;
+      --color-text-success:#00865e;
       --color-text-warning:#92400e;
       --color-text-danger:#991b1b;
       --color-border-secondary:#d1d5db;
       --color-border-tertiary:#e5e7eb;
-      --color-border-info:#bfdbfe;
-      --color-border-success:#bbf7d0;
+      --color-border-info:#90bdf0;
+      --color-border-success:#00C49A;
       --color-border-warning:#fde68a;
       --color-border-danger:#fecaca;
       --border-radius-md:6px;
@@ -446,7 +463,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.37";
+const APP_VERSION = "v2.0.40";
 const REPORTS_DB_ID = "3684e96c994180db8929c67f306c554a";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
@@ -1478,7 +1495,7 @@ function App() {
       .replace(/â€™/g,"'").replace(/â€˜/g,"'")
       .replace(/â€œ/g,'"').replace(/â€/g,'"')
       .replace(/â€"/g,"—").replace(/â€"/g,"–").replace(/â€¦/g,"...");
-    return "You are a QA evaluator for Freedom Grooming customer support.\n\n"
+    return "You are a QA evaluator for Freedom Grooming customer support. Respond in English only.\n\n"
       +"ENCODING NOTE: The transcript may contain mojibake encoding artifacts (e.g. â€™ â€œ). "
       +"Interpret these as their intended characters (smart quotes, apostrophes) and evaluate normally.\n\n"
       +"IMPORTANT CONTEXT:\n"
@@ -1850,7 +1867,7 @@ function App() {
       +"<h2 class='sec-ttl'>Ticket log &mdash; "+agentTickets.length+" ticket"+(agentTickets.length!==1?"s":"")+" reviewed</h2>"
       +ticketCards
       +"<hr style='border:none;border-top:1px solid #e5e7eb;margin:36px 0'/>"
-      +"<div class='footer'>Freedom Grooming QA &middot; "+dateLabel+" &middot; Auditors: "+auditors+"</div>"
+      +"<div class='footer'>Wingman &middot; "+dateLabel+" &middot; Auditors: "+auditors+"</div>"
       +"</div></body></html>";
   }
 
@@ -1947,7 +1964,7 @@ function App() {
       +"</head><body><div class='page'>"
       // Header
       +"<div style='text-align:center;padding-bottom:40px;border-bottom:1px solid #e5e7eb;margin-bottom:40px;'>"
-        +"<div style='font-size:13px;color:#9ca3af;letter-spacing:0.05em;text-transform:uppercase;margin-bottom:8px;'>Freedom Grooming</div>"
+        +"<div style='font-size:13px;color:#9ca3af;letter-spacing:0.05em;text-transform:uppercase;margin-bottom:8px;'>Wingman</div>"
         +"<div style='font-size:32px;font-weight:700;color:#111827;margin-bottom:4px;'>Team QA Insight</div>"
         +"<div style='font-size:13px;color:#9ca3af;margin-bottom:40px;'>"+dateLabel+"</div>"
         +"<div style='display:inline-flex;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden;'>"
@@ -1987,7 +2004,7 @@ function App() {
         +"</div>"
       +"</div>"
       +"<hr style='border:none;border-top:1px solid #e5e7eb;margin:36px 0;'/>"
-      +"<div style='font-size:11px;color:#9ca3af;text-align:center;'>Freedom Grooming QA &nbsp;&middot;&nbsp; "+dateLabel+" &nbsp;&middot;&nbsp; "+totalTickets+" tickets across "+allAgents.length+" agents</div>"
+      +"<div style='font-size:11px;color:#9ca3af;text-align:center;'>Wingman &nbsp;&middot;&nbsp; "+dateLabel+" &nbsp;&middot;&nbsp; "+totalTickets+" tickets across "+allAgents.length+" agents</div>"
       +"</div></body></html>";
   }
 
@@ -2279,7 +2296,7 @@ function App() {
 
     var rubricSummary=matrix.map(function(c){return c.id+" ("+c.label+", max "+c.max+"pt)";}).join(", ");
 
-    var prompt=`You are a senior QA analyst for Freedom Grooming, a subscription grooming brand. You are preparing a leadership briefing from QA ticket data. Your analysis must be specific, honest, and directly actionable — no generic advice.
+    var prompt=`You are a senior QA analyst for Freedom Grooming, a subscription grooming brand. You are preparing a leadership briefing from QA ticket data. Your analysis must be specific, honest, and directly actionable — no generic advice. IMPORTANT: Respond in English only. Do not use any other language or characters under any circumstances.
 
 BUSINESS CONTEXT:
 - Freedom Grooming sells subscription grooming products
@@ -3009,7 +3026,7 @@ Rules:
       // Build prompt identical to batch QA
       var justSchema=matrix.map(function(c){return '"'+c.id+'":{reason:"",improve:""}';}).join(",");
       var scoreOptions=matrix.map(function(c){return c.id+": "+c.levels.map(function(l){return l.level+(l.points!==null?" ("+l.points+")":"");}).join("/");}).join("; ");
-      var prompt = "You are a QA analyst for Freedom Grooming customer support. Score this ticket against the rubric.\n\nSCORING: "+scoreOptions+".\nUse NA if category doesn't apply.\n\n"
+      var prompt = "You are a QA analyst for Freedom Grooming customer support. Score this ticket against the rubric. Respond in English only.\n\nSCORING: "+scoreOptions+".\nUse NA if category doesn't apply.\n\n"
         +"AUTOFAIL CONDITIONS:\n1. Failing to complete promised resolution\n2. Wrong account-level action\n3. Financial/operational risk through incorrect workflow\n4. Materially inaccurate policy info\n5. Tone that materially worsens risk\n\n"
         +"TICKET INFO:\nAgent: "+manualForm.agentName+"\nContact Reason: "+(manualForm.contactReason||"Unknown")+"\n\n"
         +"TRANSCRIPT:\\n"+manualForm.transcript+"\\n\\n"
@@ -3168,7 +3185,7 @@ Rules:
 
     return "<!DOCTYPE html><html><head><meta charset=\'utf-8\'><style>*{box-sizing:border-box;margin:0;padding:0;}body{font-family:Arial,sans-serif;background:white;color:#111827;-webkit-print-color-adjust:exact;}.page{max-width:720px;margin:0 auto;padding:48px 40px 60px;}</style></head><body><div class=\'page\'>"
       +"<div style=\'padding-bottom:28px;border-bottom:1px solid #e5e7eb;margin-bottom:32px;\'>"
-      +"<div style=\'font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:#6b7280;margin-bottom:6px;\'>Freedom Grooming &middot; QA Calibration Report</div>"
+      +"<div style=\'font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:#6b7280;margin-bottom:6px;\'>Wingman &middot; QA Calibration Report</div>"
       +"<h1 style=\'font-size:24px;font-weight:700;margin-bottom:4px;\'>AI Calibration Analysis</h1>"
       +"<p style=\'font-size:12px;color:#6b7280;margin-bottom:16px;\'>Generated "+new Date().toLocaleDateString("en-US",{month:"long",day:"numeric",year:"numeric"})+" &nbsp;&middot;&nbsp; Based on "+(data._disputedCount||0)+" disputed tickets</p>"
       +"<div style=\'display:inline-flex;align-items:center;gap:10px;padding:10px 16px;background:"+alignBg+";border-radius:8px;border:1px solid "+alignColor+"40;\'>"
@@ -3181,7 +3198,7 @@ Rules:
       +(quickHTML?section("Quick Wins",quickHTML):"")
       +(agentHTML?section("Agent & Contact Reason Patterns",agentHTML):"")
       +"<hr style=\'border:none;border-top:1px solid #e5e7eb;margin:32px 0;\'>"
-      +"<div style=\'font-size:11px;color:#9ca3af;text-align:center;\'>Freedom Grooming QA Calibration &nbsp;&middot;&nbsp; "+new Date().toLocaleDateString()+"</div>"
+      +"<div style=\'font-size:11px;color:#9ca3af;text-align:center;\'>Wingman Calibration &nbsp;&middot;&nbsp; "+new Date().toLocaleDateString()+"</div>"
       +"</div></body></html>";
   }
 
@@ -3460,9 +3477,24 @@ Rules:
       <div style={{display:"flex",alignItems:"center",justifyContent:"center",minHeight:"100vh",background:"var(--color-background-secondary)"}}>
         <div style={{background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-lg)",padding:"2.5rem 2rem",width:"100%",maxWidth:"400px"}}>
           <div style={{marginBottom:"2rem",textAlign:"center"}}>
-            <div style={{fontSize:"28px",marginBottom:"8px"}}>✂️</div>
-            <h2 style={{fontSize:"20px",fontWeight:700,margin:"0 0 6px",color:"var(--color-text-primary)"}}>Freedom Grooming QA</h2>
-            <p style={{fontSize:"13px",color:"var(--color-text-secondary)",margin:0}}>Sign in to continue</p>
+            <div style={{display:"flex",justifyContent:"center",marginBottom:"12px"}}>
+              <svg width="56" height="56" viewBox="0 0 160 160" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <rect width="160" height="160" rx="28" fill="#0D1B3E"/>
+                <g fill="white">
+                  {/* Left wing */}
+                  <path d="M80 72 C72 60, 52 44, 22 38 C34 46, 44 52, 52 60 C44 54, 30 50, 18 52 C30 58, 42 62, 52 68 C44 65, 32 64, 22 68 C34 70, 46 72, 56 76 L80 76 Z"/>
+                  {/* Right wing */}
+                  <path d="M80 72 C88 60, 108 44, 138 38 C126 46, 116 52, 108 60 C116 54, 130 50, 142 52 C130 58, 118 62, 108 68 C116 65, 128 64, 138 68 C126 70, 114 72, 104 76 L80 76 Z"/>
+                  {/* Stem */}
+                  <rect x="78" y="76" width="4" height="32" rx="2"/>
+                  {/* Dot */}
+                  <circle cx="80" cy="114" r="6"/>
+                </g>
+              </svg>
+            </div>
+            <h2 style={{fontSize:"22px",fontWeight:500,margin:"0 0 2px",color:"var(--color-text-primary)",letterSpacing:"-0.3px"}}>Wingman</h2>
+            <p style={{fontSize:"12px",color:"var(--color-text-secondary)",margin:"0 0 4px",fontWeight:500,textTransform:"uppercase",letterSpacing:"0.06em"}}>By Freebird CX</p>
+            <p style={{fontSize:"13px",color:"var(--color-text-secondary)",margin:"12px 0 0"}}>Sign in to continue</p>
           </div>
 
           {/* Google SSO Button */}
@@ -3514,8 +3546,22 @@ Rules:
       <div style={{borderBottom:"0.5px solid var(--color-border-tertiary)",paddingBottom:"16px",marginBottom:"20px"}}>
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:"8px"}}>
           <div>
-            <h2 style={{fontSize:"18px",fontWeight:700,margin:"0 0 4px",color:"var(--color-text-primary)"}}>Freedom Grooming QA</h2>
-            <span style={{fontSize:"12px",color:"var(--color-text-secondary)"}}>{week}</span>
+            <div style={{display:"flex",alignItems:"center",gap:"10px"}}>
+              <svg width="28" height="28" viewBox="0 0 160 160" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <rect width="160" height="160" rx="28" fill="#0D1B3E"/>
+                <g fill="white">
+                  <path d="M80 72 C72 60, 52 44, 22 38 C34 46, 44 52, 52 60 C44 54, 30 50, 18 52 C30 58, 42 62, 52 68 C44 65, 32 64, 22 68 C34 70, 46 72, 56 76 L80 76 Z"/>
+                  <path d="M80 72 C88 60, 108 44, 138 38 C126 46, 116 52, 108 60 C116 54, 130 50, 142 52 C130 58, 118 62, 108 68 C116 65, 128 64, 138 68 C126 70, 114 72, 104 76 L80 76 Z"/>
+                  <rect x="78" y="76" width="4" height="32" rx="2"/>
+                  <circle cx="80" cy="114" r="6"/>
+                </g>
+              </svg>
+              <div>
+                <h2 style={{fontSize:"17px",fontWeight:500,margin:0,color:"var(--color-text-primary)",letterSpacing:"-0.2px"}}>Wingman</h2>
+                <span style={{fontSize:"10px",color:"var(--color-text-secondary)",fontWeight:500,textTransform:"uppercase",letterSpacing:"0.06em"}}>By Freebird CX</span>
+              </div>
+            </div>
+            <span style={{fontSize:"12px",color:"var(--color-text-secondary)",display:"block",marginTop:"4px",marginLeft:"38px"}}>{week}</span>
           </div>
           <div style={{display:"flex",gap:"8px",alignItems:"center"}}>
             <button onClick={syncTickets} disabled={syncing} style={{...ghost,fontSize:"12px",opacity:syncing?0.6:1}}>
