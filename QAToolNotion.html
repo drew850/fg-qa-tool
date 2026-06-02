@@ -2,10 +2,23 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.35
+  Version:  2.0.37
   Date:     2026-06-02
 
   Changelog:
+  v2.0.37 (2026-06-02)
+    - Deleted/archived tickets now skipped in fetcher and batch QA
+    - loadAllData fetches deleted ticket IDs from Notion on startup (Deleted=true filter)
+    - deletedTicketIds added to alreadyDone in runBatchQA
+    - Fetcher skips tickets in deletedTicketIds before message fetch
+    - Filter summary shows "Skipped — previously deleted" count
+
+  v2.0.36 (2026-06-02)
+    - Fetch tab: add agent multi-select checkbox dropdown (populated from Notion ticket DB)
+    - Agent assignment filter kept separately (has/no agent)
+    - Dropdown closes on outside click, has All/Clear shortcuts, shows selected count badge
+    - selectedAgents filter applied after assignment filter, counted in filter summary
+
   v2.0.35 (2026-06-02)
     - Fix: Add 100ms delay between Gorgias page fetches — zero delay caused ERR_CONNECTION_RESET
     - 100ms is fast enough to avoid 2min freeze, slow enough to not get dropped by Gorgias
@@ -433,7 +446,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.35";
+const APP_VERSION = "v2.0.37";
 const REPORTS_DB_ID = "3684e96c994180db8929c67f306c554a";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
@@ -1124,6 +1137,7 @@ function App() {
 
   const [view,setView]=useState("batch");
   const [tickets,setTickets]=useState([]);
+  const [deletedTicketIds,setDeletedTicketIds]=useState(new Set());
   const [matrix,setMatrix]=useState(getDefaultMatrix());
   const [autofailList,setAutofailList]=useState(DEFAULT_AUTOFAILS);
   const [ctf,setCtf]=useState(makeDefaultCtf());
@@ -1179,6 +1193,7 @@ function App() {
     status:{closed:true,open:true,pending:true},
     channels:{email:false,chat:false,sms:false,voice:false,api:false},
     agentFilter:"Has agent assigned",
+    selectedAgents:{},
     crL1:"",crL2:"",prodL1:"",resL1:"",resL2:"",addResL1:"",addResL2:"",
     msgMin:"",msgMax:"",
     ticketsPerAgent:"",maxTickets:"500",skipHours:"24",
@@ -1191,6 +1206,15 @@ function App() {
   const [fetchedTickets,setFetchedTickets]=useState([]);
   const [fetchError,setFetchError]=useState("");
   const [showAdvancedFetch,setShowAdvancedFetch]=useState(false);
+  const [showAgentDropdown,setShowAgentDropdown]=useState(false);
+  useEffect(function(){
+    if(!showAgentDropdown) return;
+    function handler(e){
+      if(!e.target.closest(".agent-dropdown-container")) setShowAgentDropdown(false);
+    }
+    document.addEventListener("mousedown",handler);
+    return function(){document.removeEventListener("mousedown",handler);};
+  },[showAgentDropdown]);
 
   // Manual Audit tab
   const [manualForm,setManualForm]=useState({ticketId:"",agentName:"",contactReason:"",ticketUrl:"",customerEmail:"",week:"",transcript:""});
@@ -1489,9 +1513,10 @@ function App() {
     if(!batchTickets.length)return;
     setBatchRunning(true);batchStopRef.current=false;batchPausedRef.current=false;setBatchPaused(false);
 
-    // Build set of already-evaluated ticket IDs (from Notion DB + current batch results)
+    // Build set of already-evaluated ticket IDs (active Notion tickets + deleted/archived + current batch results)
     var alreadyDone=new Set(
       tickets.map(function(t){return String(t.ticketId);})
+        .concat(Array.from(deletedTicketIds))
         .concat(batchResults.filter(function(r){return !r.error;}).map(function(r){return String(r.ticketId);}))
     );
 
@@ -2711,7 +2736,7 @@ Rules:
         raw:0, skippedStatus:0, skippedRecentlyClosed:0,
         skippedChannel:0, skippedAgentFilter:0,
         skippedCR:0, skippedRes:0, skippedMsgCount:0, skippedKeyword:0,
-        skippedAgentCap:0, result:0
+        skippedAgentCap:0, skippedDeleted:0, result:0
       };
 
       setFetchStatus("Fetching tickets from Gorgias...");
@@ -2766,7 +2791,7 @@ Rules:
         console.log("[QA][filter] Channel: all (none selected)");
       }
 
-      // Agent filter
+      // Agent assignment filter
       if(f.agentFilter==="Has agent assigned") {
         var preAg = allTickets.length;
         allTickets = allTickets.filter(function(t){return t.assignee_user;});
@@ -2777,6 +2802,19 @@ Rules:
         allTickets = allTickets.filter(function(t){return !t.assignee_user;});
         fc.skippedAgentFilter = preAg2 - allTickets.length;
         console.log("[QA][filter] Agent (no agent):", preAg2, "→", allTickets.length);
+      }
+
+      // Specific agent filter
+      var selectedAgentNames = Object.entries(f.selectedAgents||{}).filter(function(e){return e[1];}).map(function(e){return e[0].toLowerCase();});
+      if(selectedAgentNames.length) {
+        var preAgSel = allTickets.length;
+        allTickets = allTickets.filter(function(t){
+          var au = t.assignee_user;
+          var name = au ? (au.name||((au.firstname||"")+" "+(au.lastname||"")).trim()).toLowerCase() : "";
+          return selectedAgentNames.includes(name);
+        });
+        fc.skippedAgentFilter += preAgSel - allTickets.length;
+        console.log("[QA][filter] Specific agents ("+selectedAgentNames.join(",")+"):", preAgSel, "→", allTickets.length);
       }
 
       // Fetch messages and build transcripts
@@ -2806,6 +2844,12 @@ Rules:
         if(f.resL2 && f.resL2.trim() && resParts[1].toLowerCase() !== f.resL2.trim().toLowerCase()) { console.log("[QA][filter] Skip #"+tid+" Res L2='"+resParts[1]+"' ≠ '"+f.resL2+"'"); fc.skippedRes++; continue; }
         if(f.addResL1 && addResParts[0].toLowerCase() !== f.addResL1.toLowerCase()) { console.log("[QA][filter] Skip #"+tid+" AddRes L1='"+addResParts[0]+"' ≠ '"+f.addResL1+"'"); fc.skippedRes++; continue; }
         if(f.addResL2 && f.addResL2.trim() && addResParts[1].toLowerCase() !== f.addResL2.trim().toLowerCase()) { console.log("[QA][filter] Skip #"+tid+" AddRes L2='"+addResParts[1]+"' ≠ '"+f.addResL2+"'"); fc.skippedRes++; continue; }
+
+        // Skip tickets that were previously deleted/archived in Notion
+        if(deletedTicketIds.has(String(tid))) {
+          console.log("[QA][filter] Skip #"+tid+" — previously deleted in Notion");
+          fc.skippedDeleted++; continue;
+        }
 
         var agentName = "";
         if(t.assignee_user) {
@@ -3154,6 +3198,27 @@ Rules:
         activeTickets = activeTickets.filter(function(tk){return tk.agentName===agentFilter;});
       }
       setTickets(activeTickets);
+
+      // Load deleted ticket IDs — used to skip in fetcher + batch QA
+      setSyncStatus("Loading deleted ticket IDs...");
+      var deletedIds = new Set();
+      var delCursor = undefined, delMore = true;
+      while(delMore) {
+        var delBody = {
+          page_size: 100,
+          filter: { property: "Deleted", checkbox: { equals: true } }
+        };
+        if(delCursor) delBody.start_cursor = delCursor;
+        var delData = await notionAPI("/v1/databases/"+setup.ticketsDbId+"/query","POST",delBody);
+        (delData.results||[]).forEach(function(p){
+          var tid = getProp(p,"Ticket ID")||"";
+          if(tid) deletedIds.add(String(tid));
+        });
+        delMore = delData.has_more||false;
+        delCursor = delData.next_cursor;
+      }
+      setDeletedTicketIds(deletedIds);
+      console.log("[QA] Loaded",deletedIds.size,"deleted ticket IDs");
       setSyncStatus("Loading users...");
       await loadUsersFromNotion(setup.configDbId);
       setSyncStatus("Loading matrix...");
@@ -4337,13 +4402,45 @@ Rules:
             </div>
 
             {/* Agent + CR + Limits */}
-            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr 1fr",gap:"12px",marginBottom:"14px"}}>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr 1fr 1fr",gap:"12px",marginBottom:"14px"}}>
               <div>
-                <label style={{...lbl,marginBottom:"4px"}}>Agent</label>
+                <label style={{...lbl,marginBottom:"4px"}}>Agent assignment</label>
                 <select value={fetchForm.agentFilter} onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{agentFilter:e.target.value});});}}
                   style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}>
                   {["All tickets","Has agent assigned","No agent assigned"].map(function(o){return <option key={o} value={o}>{o}</option>;})}
                 </select>
+              </div>
+              <div style={{position:"relative"}} className="agent-dropdown-container">
+                <label style={{...lbl,marginBottom:"4px"}}>
+                  Agents
+                  {Object.values(fetchForm.selectedAgents||{}).some(Boolean)&&<span style={{marginLeft:"5px",fontSize:"10px",padding:"1px 5px",background:"var(--color-background-info)",color:"var(--color-text-info)",borderRadius:"3px",border:"0.5px solid var(--color-border-info)"}}>
+                    {Object.values(fetchForm.selectedAgents).filter(Boolean).length} selected
+                  </span>}
+                </label>
+                <button
+                  onClick={function(){setShowAgentDropdown(function(v){return !v;});}}
+                  style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",background:"var(--color-background-primary)",textAlign:"left",cursor:"pointer",color:"var(--color-text-primary)",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <span>{Object.values(fetchForm.selectedAgents||{}).some(Boolean) ? Object.entries(fetchForm.selectedAgents).filter(function(e){return e[1];}).map(function(e){return e[0];}).join(", ") : "All agents"}</span>
+                  <span style={{fontSize:"10px",color:"var(--color-text-secondary)"}}>{showAgentDropdown?"▾":"▸"}</span>
+                </button>
+                {showAgentDropdown&&(
+                  <div style={{position:"absolute",top:"100%",left:0,right:0,zIndex:100,background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",boxShadow:"0 4px 12px rgba(0,0,0,0.15)",maxHeight:"220px",overflowY:"auto",marginTop:"2px"}}>
+                    <div style={{padding:"6px 8px",borderBottom:"0.5px solid var(--color-border-tertiary)",display:"flex",gap:"8px"}}>
+                      <button onClick={function(){var all={};agents.forEach(function(a){all[a]=true;});setFetchForm(function(f){return Object.assign({},f,{selectedAgents:all});});}}
+                        style={{fontSize:"11px",padding:"2px 8px",background:"none",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",cursor:"pointer",color:"var(--color-text-secondary)"}}>All</button>
+                      <button onClick={function(){setFetchForm(function(f){return Object.assign({},f,{selectedAgents:{}});});}}
+                        style={{fontSize:"11px",padding:"2px 8px",background:"none",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",cursor:"pointer",color:"var(--color-text-secondary)"}}>Clear</button>
+                    </div>
+                    {agents.map(function(agentName){
+                      var checked = fetchForm.selectedAgents[agentName]||false;
+                      return <label key={agentName} style={{display:"flex",alignItems:"center",gap:"8px",padding:"6px 10px",cursor:"pointer",fontSize:"12px",borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
+                        <input type="checkbox" checked={checked}
+                          onChange={function(e){var v=e.target.checked;setFetchForm(function(f){var sa=Object.assign({},f.selectedAgents);sa[agentName]=v;return Object.assign({},f,{selectedAgents:sa});});}}/>
+                        {agentName}
+                      </label>;
+                    })}
+                  </div>
+                )}
               </div>
               <div>
                 <label style={{...lbl,marginBottom:"4px"}}>Contact Reason L1</label>
@@ -4468,6 +4565,7 @@ Rules:
                     {label:"Skipped — resolution",val:fetchSummary.skippedRes,color:fetchSummary.skippedRes>0?"var(--color-text-warning)":null},
                     {label:"Skipped — msg count",val:fetchSummary.skippedMsgCount,color:fetchSummary.skippedMsgCount>0?"var(--color-text-warning)":null},
                     {label:"Skipped — keyword",val:fetchSummary.skippedKeyword,color:fetchSummary.skippedKeyword>0?"var(--color-text-warning)":null},
+                    {label:"Skipped — previously deleted",val:fetchSummary.skippedDeleted,color:fetchSummary.skippedDeleted>0?"var(--color-text-warning)":null},
                     {label:"Skipped — agent cap",val:fetchSummary.skippedAgentCap,color:fetchSummary.skippedAgentCap>0?"var(--color-text-warning)":null},
                     {label:"✓ Result",val:fetchSummary.result,color:"var(--color-text-success)",bold:true},
                   ].map(function(row){
