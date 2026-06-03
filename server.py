@@ -14,6 +14,7 @@ GORGIAS_DOMAIN      = os.environ.get("GORGIAS_DOMAIN", "freedomgrooming.gorgias.
 GORGIAS_USERNAME    = os.environ.get("GORGIAS_USERNAME", "")
 GORGIAS_API_KEY     = os.environ.get("GORGIAS_API_KEY", "")
 QA_USERS_DB_ID      = os.environ.get("QA_USERS_DB_ID", "3744e96c994180c9b8adcec4048bc6fb")
+EMERGENCY_PIN       = os.environ.get("EMERGENCY_PIN", "")
 
 ALLOWED_DOMAINS     = {"myfreebird.com", "freedom-grooming.com"}
 
