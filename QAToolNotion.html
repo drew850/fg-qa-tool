@@ -2,10 +2,15 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.44
-  Date:     2026-06-03
+  Version:  2.0.45
+  Date:     2026-06-04
 
   Changelog:
+  v2.0.45 (2026-06-04)
+    - Fix: agent role missing from Settings role dropdowns — defaulted to Full
+    - Add agent option to existing user role dropdown and new user form
+    - Fix role badge display in Settings list and header to show Agent correctly
+
   v2.0.44 (2026-06-03)
     - Login gate: users must exist in Notion QA Users DB to access tool
     - Removed domain-based fallback — no more implicit view access for @myfreebird.com
@@ -494,7 +499,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.44";
+const APP_VERSION = "v2.0.45";
 const REPORTS_DB_ID = "3684e96c994180db8929c67f306c554a";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
@@ -3670,7 +3675,7 @@ Rules:
                 color: isFullAccess?"var(--color-text-info)":isEditor?"var(--color-text-success)":"var(--color-text-secondary)",
                 border: "0.5px solid "+(isFullAccess?"var(--color-border-info)":isEditor?"var(--color-border-success)":"var(--color-border-secondary)")
               }}>
-                {isFullAccess?"Full":isEditor?"Edit":"View"}
+                {isFullAccess?"Full":isEditor?"Edit":isViewOnly&&currentUser.role==="agent"?"Agent":"View"}
               </span>
               <button onClick={handleLogout} style={{background:"none",border:"none",cursor:"pointer",fontSize:"11px",color:"var(--color-text-secondary)",padding:"0 0 0 4px"}}>Sign out</button>
             </div>
@@ -5822,13 +5827,14 @@ Rules:
                                   <option value="full">Full</option>
                                   <option value="edit">Edit</option>
                                   <option value="view">View</option>
+                                  <option value="agent">Agent</option>
                                 </select>
                               ):(
                                 <span style={{fontSize:"11px",fontWeight:700,padding:"2px 8px",borderRadius:"3px",
                                   background:u.role==="full"?"var(--color-background-info)":u.role==="edit"?"var(--color-background-success)":"var(--color-background-secondary)",
                                   color:u.role==="full"?"var(--color-text-info)":u.role==="edit"?"var(--color-text-success)":"var(--color-text-secondary)",
                                   border:"0.5px solid "+(u.role==="full"?"var(--color-border-info)":u.role==="edit"?"var(--color-border-success)":"var(--color-border-secondary)")
-                                }}>{u.role==="full"?"Full":u.role==="edit"?"Edit":"View"}</span>
+                                }}>{u.role==="full"?"Full":u.role==="edit"?"Edit":u.role==="agent"?"Agent":"View"}</span>
                               )}
                             </div>
                             {/* Remove */}
@@ -5890,6 +5896,7 @@ Rules:
                           <option value="full">Full — all access</option>
                           <option value="edit">Edit — QA + dispute</option>
                           <option value="view">View — read-only</option>
+                          <option value="agent">Agent — own tickets only</option>
                         </select>
                       </div>
                       {newUserError&&<p style={{margin:"0 0 8px",fontSize:"12px",color:"var(--color-text-danger)"}}>{newUserError}</p>}
