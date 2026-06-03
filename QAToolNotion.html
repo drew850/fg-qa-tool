@@ -2,10 +2,41 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.40
+  Version:  2.0.44
   Date:     2026-06-03
 
   Changelog:
+  v2.0.44 (2026-06-03)
+    - Login gate: users must exist in Notion QA Users DB to access tool
+    - Removed domain-based fallback — no more implicit view access for @myfreebird.com
+    - Not in DB → blocked screen "Access not granted. Contact your admin."
+    - In DB but inactive → blocked screen "Account deactivated. Contact your admin."
+    - Add agent role — treated same as view (own tickets only), explicit in DB
+    - isViewOnly and _agentFilter updated to include agent role
+    - loginWithSession loads Notion users first, then gates strictly on DB membership
+
+  v2.0.43 (2026-06-03)
+    - Users now loaded from dedicated Notion QA Users DB (3744e96c994180c9b8adcec4048bc6fb)
+    - loadUsersFromNotion queries DB directly — no longer stored as JSON in QA Config
+    - addNewUser / updateUserField / removeUser all write directly to Notion (no Save button needed)
+    - server.py: fetch_qa_users_from_notion() with 5-min cache — powers emergency login
+    - server.py: find_user_by_email() queries Notion, falls back to domain-based view
+    - QA_USERS_DB_ID injected via window.__ENV__ — set in Railway env vars
+    - hardcoded USERS constant kept as display fallback only
+
+  v2.0.42 (2026-06-03)
+    - Refactor: merge two-phase fetch into single streaming loop
+    - All filters now applied inline per-ticket as pages arrive from Gorgias
+    - Stops fetching new pages immediately when maxResults is reached
+    - Live status shows "Searched X · Matched Y / Z" updating in real time
+    - With maxResults=1, stops after finding the first matching ticket
+
+  v2.0.41 (2026-06-03)
+    - Fix: Original AI note in dispute view now always renders
+    - Falls back to category note field if justifications.reason is missing
+    - Shows "No AI note available" placeholder instead of blank when both are absent
+    - Likely cause: older tickets scored before per-category justification storage
+
   v2.0.40 (2026-06-03)
     - Update logo SVG to match ChatGPT-generated Wingman mark
     - Swept-wing paths with feather detail, thin stem, dot — matches actual logo asset
@@ -463,7 +494,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.40";
+const APP_VERSION = "v2.0.44";
 const REPORTS_DB_ID = "3684e96c994180db8929c67f306c554a";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
@@ -1149,6 +1180,7 @@ function App() {
   const [currentUser,setCurrentUser]=useState(null);
   const [loginEmail,setLoginEmail]=useState("");
   const [loginError,setLoginError]=useState("");
+  const [loginBlocked,setLoginBlocked]=useState(null); // null | {reason: string, email: string}
   const [ssoLoading,setSsoLoading]=useState(false);
   const [sessionToken,setSessionToken]=useState(function(){return sessionStorage.getItem("qa_session")||"";});
 
@@ -1286,7 +1318,7 @@ function App() {
       console.log("[QA] setting currentUser:", {email:em,...user});
       setCurrentUser({email:em,...user,agentName:user.agentName||""});
       setLoginError("");
-      var setup1=Object.assign({},HARDCODED_SETUP,{_agentFilter:user.role==="view"?(user.agentName||""):""});
+      var setup1=Object.assign({},HARDCODED_SETUP,{_agentFilter:(user.role==="view"||user.role==="agent")?(user.agentName||""):""});
       setNotionSetup(HARDCODED_SETUP);
       setLoading(true);
       loadAllData(setup1);
@@ -1333,17 +1365,41 @@ function App() {
     var session=await verifySession(token);
     if(session){
       var em=session.email.toLowerCase().trim();
-      // Match against live user list first, then hardcoded USERS
-      var liveUser=effectiveUsers.find(function(u){return u.email.toLowerCase()===em;});
-      var hardUser=USERS[em];
-      var user=liveUser||hardUser;
-      var role=user?user.role:"view";
-      var name=user?user.name:(session.name||em.split("@")[0]);
-      var agentName=user?(user.agentName||""):"";
+
+      // Load users from Notion first so we have the latest list
+      var users = await loadUsersFromNotion();
+
+      // Strict DB lookup — no domain fallback
+      var user = users.find(function(u){return u.email.toLowerCase()===em;});
+
+      // Not in DB at all
+      if(!user){
+        sessionStorage.removeItem("qa_session");
+        setSessionToken("");
+        setLoginBlocked({reason:"not_found", email:em});
+        setSsoLoading(false);
+        return;
+      }
+
+      // In DB but inactive
+      if(user.active===false){
+        sessionStorage.removeItem("qa_session");
+        setSessionToken("");
+        setLoginBlocked({reason:"inactive", email:em, name:user.name});
+        setSsoLoading(false);
+        return;
+      }
+
+      // Valid user — assign role and load
+      var role      = user.role||"agent";
+      var name      = user.name||(session.name||em.split("@")[0]);
+      var agentName = user.agentName||user.name||"";
+      var isAgent   = role==="agent"||role==="view";
+
       sessionStorage.setItem("qa_session",token);
       setSessionToken(token);
       setCurrentUser({email:em,name:name,role:role,agentName:agentName});
-      var setup2=Object.assign({},HARDCODED_SETUP,{_agentFilter:role==="view"?agentName:""});
+      var setup2=Object.assign({},HARDCODED_SETUP,{_agentFilter:isAgent?agentName:""});
       setNotionSetup(HARDCODED_SETUP);
       setLoading(true);
       loadAllData(setup2);
@@ -1384,7 +1440,7 @@ function App() {
   // Derived from logged-in user (safe to read even when null)
   var isFullAccess = currentUser&&currentUser.role==="full";
   var isEditor     = currentUser&&(currentUser.role==="full"||currentUser.role==="edit");
-  var isViewOnly   = currentUser&&currentUser.role==="view";
+  var isViewOnly   = currentUser&&(currentUser.role==="view"||currentUser.role==="agent");
   var activeAuditor= currentUser?currentUser.name:"";
   var disputerName = currentUser?currentUser.name:"";
   // For View users with an agentName — filter tickets to their own only
@@ -2603,60 +2659,129 @@ Rules:
     });
   }
 
-  async function loadUsersFromNotion(configDbId) {
+  async function loadUsersFromNotion() {
+    var dbId = window.__ENV__&&window.__ENV__.QA_USERS_DB_ID;
+    if(!dbId) { setUserList(hardcodedUsersArray()); return hardcodedUsersArray(); }
     try {
-      var data = await loadConfigFromNotion(configDbId, "users");
-      if (data && Array.isArray(data) && data.length > 0) {
-        setUserList(data);
-        return data;
-      } else {
-        // First run — seed from hardcoded USERS
-        var seeded = hardcodedUsersArray();
-        setUserList(seeded);
-        return seeded;
+      var users = [];
+      var cursor = undefined, hasMore = true;
+      while(hasMore) {
+        var body = { page_size: 100 };
+        if(cursor) body.start_cursor = cursor;
+        var data = await notionAPI("/v1/databases/"+dbId+"/query","POST",body);
+        (data.results||[]).forEach(function(page){
+          var props = page.properties||{};
+          // Email is the Title field
+          var emailArr = (props.Email||{}).title||[];
+          var email = emailArr[0]&&emailArr[0].text&&emailArr[0].text.content ? emailArr[0].text.content.toLowerCase().trim() : "";
+          var nameArr  = (props.Name||{}).rich_text||[];
+          var name     = nameArr[0]&&nameArr[0].text ? nameArr[0].text.content.trim() : "";
+          // Role — support both select and rich_text
+          var roleProp = props.Role||{};
+          var role;
+          if(roleProp.select&&roleProp.select.name) {
+            role = roleProp.select.name.toLowerCase().trim();
+          } else {
+            var roleArr = roleProp.rich_text||[];
+            role = roleArr[0]&&roleArr[0].text ? roleArr[0].text.content.toLowerCase().trim() : "view";
+          }
+          var activeVal = (props.Active||{}).checkbox;
+          var active = activeVal !== false; // default true if not set
+          var notesArr = (props.Notes||{}).rich_text||[];
+          var notes = notesArr[0]&&notesArr[0].text ? notesArr[0].text.content.trim() : "";
+          if(email) users.push({
+            notionPageId: page.id,
+            email, name: name||email.split("@")[0], role, active, notes,
+            agentName: name // display_name = Gorgias agent name by convention
+          });
+        });
+        hasMore = data.has_more||false;
+        cursor  = data.next_cursor;
       }
+      console.log("[QA] Loaded", users.length, "users from QA Users DB");
+      setUserList(users);
+      return users;
     } catch(e) {
       console.error("[QA] loadUsers:", e);
-      setUserList(hardcodedUsersArray());
-      return hardcodedUsersArray();
+      var fallback = hardcodedUsersArray();
+      setUserList(fallback);
+      return fallback;
     }
   }
 
   async function saveUsersToNotion() {
-    if (!notionSetup) return;
-    setSavingUsers(true);
-    try {
-      await saveConfigToNotion(notionSetup.configDbId, "users", userList);
-      setUserListDirty(false);
-      addToast("Access settings saved");
-    } catch(e) {
-      addToast("Save failed: " + e.message, "error");
-    }
-    setSavingUsers(false);
+    // Users are now written directly to Notion QA Users DB via add/update/remove functions
+    // This is a no-op kept for compatibility
+    setUserListDirty(false);
+    addToast("Users are managed directly in Notion QA Users DB");
   }
 
-  function addNewUser() {
+  async function addUserToNotion(userData) {
+    var dbId = window.__ENV__&&window.__ENV__.QA_USERS_DB_ID;
+    if(!dbId) { addToast("QA Users DB not configured","error"); return; }
+    var props = {
+      "Email": {title:[{text:{content:userData.email}}]},
+      "Name":  {rich_text:[{text:{content:userData.name}}]},
+      "Role":  {rich_text:[{text:{content:userData.role}}]},
+      "Active":{checkbox:true},
+    };
+    if(userData.notes) props["Notes"] = {rich_text:[{text:{content:userData.notes}}]};
+    await notionAPI("/v1/pages","POST",{parent:{database_id:dbId},properties:props});
+  }
+
+  async function updateUserInNotion(notionPageId, fields) {
+    var props = {};
+    if(fields.name  !== undefined) props["Name"]   = {rich_text:[{text:{content:fields.name}}]};
+    if(fields.role  !== undefined) props["Role"]   = {rich_text:[{text:{content:fields.role}}]};
+    if(fields.active!== undefined) props["Active"] = {checkbox:fields.active};
+    if(fields.notes !== undefined) props["Notes"]  = {rich_text:[{text:{content:fields.notes}}]};
+    await notionAPI("/v1/pages/"+notionPageId,"PATCH",{properties:props});
+  }
+
+  async function removeUserFromNotion(notionPageId) {
+    // Archive the page (soft delete)
+    await notionAPI("/v1/pages/"+notionPageId,"PATCH",{archived:true});
+  }
+
+  async function addNewUser() {
     var em = newUserForm.email.trim().toLowerCase();
     var nm = newUserForm.name.trim();
     if (!em) { setNewUserError("Email is required"); return; }
     if (!nm) { setNewUserError("Name is required"); return; }
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(em)) { setNewUserError("Enter a valid email"); return; }
     if (userList.some(function(u){return u.email===em;})) { setNewUserError("User already exists"); return; }
-    setUserList(function(ul){return ul.concat([{email:em,name:nm,role:newUserForm.role,assignedAgents:newUserForm.assignedAgents||[]}]);});
-    setUserListDirty(true);
-    setNewUserForm({email:"",name:"",role:"edit",assignedAgents:[]});
-    setNewUserError("");
+    setSavingUsers(true);
+    try {
+      await addUserToNotion({email:em, name:nm, role:newUserForm.role, notes:newUserForm.notes||""});
+      await loadUsersFromNotion(); // refresh from Notion to get notionPageId
+      setNewUserForm({email:"",name:"",role:"edit",notes:""});
+      setNewUserError("");
+      addToast("User added");
+    } catch(e) { setNewUserError("Save failed: "+e.message); }
+    setSavingUsers(false);
   }
 
-  function updateUserField(email, field, val) {
+  async function updateUserField(email, field, val) {
+    var user = userList.find(function(u){return u.email===email;});
+    if(!user||!user.notionPageId) { addToast("User not found in Notion","error"); return; }
+    // Update local state immediately for responsive UI
     setUserList(function(ul){return ul.map(function(u){return u.email===email?Object.assign({},u,{[field]:val}):u;});});
-    setUserListDirty(true);
+    try {
+      await updateUserInNotion(user.notionPageId, {[field]:val});
+    } catch(e) { addToast("Update failed: "+e.message,"error"); }
   }
 
-  function removeUser(email) {
-    if (!window.confirm("Remove "+email+"? Their tickets will remain in the database but orphaned.")) return;
+  async function removeUser(email) {
+    var user = userList.find(function(u){return u.email===email;});
+    if(!user) return;
+    if(!window.confirm("Remove "+email+"? They will be archived in Notion and lose access immediately.")) return;
     setUserList(function(ul){return ul.filter(function(u){return u.email!==email;});});
-    setUserListDirty(true);
+    if(user.notionPageId) {
+      try {
+        await removeUserFromNotion(user.notionPageId);
+        addToast("User removed");
+      } catch(e) { addToast("Remove failed: "+e.message,"error"); }
+    }
   }
 
   // Derive effective user list for app logic — merge Notion users with hardcoded fallback
@@ -2740,7 +2865,6 @@ Rules:
       var filterByStatus = activeStatuses.length > 0 && activeStatuses.length < 3;
       console.log("[QA][filter] Status filter:", filterByStatus ? activeStatuses.join(", ") : "all statuses");
 
-      var allTickets = [];
       var cursor = null;
       var maxTickets = parseInt(f.maxTickets||500) || 500;
       var skipHrs = parseInt(f.skipHours||"0") || 0;
@@ -2748,7 +2872,6 @@ Rules:
       if(cutoffSkip) console.log("[QA][fetch] Skipping tickets closed within last "+skipHrs+"h, cutoff:", cutoffSkip);
       var reachedCutoff = false;
 
-      // Filter counters
       var fc = {
         raw:0, skippedStatus:0, skippedRecentlyClosed:0,
         skippedChannel:0, skippedAgentFilter:0,
@@ -2756,10 +2879,17 @@ Rules:
         skippedAgentCap:0, skippedDeleted:0, result:0
       };
 
-      setFetchStatus("Fetching tickets from Gorgias...");
-      console.log("[QA][fetch] Date filter (client-side) — start:", since, "end:", until||"none");
+      var channels = Object.entries(f.channels).filter(function(e){return e[1];}).map(function(e){return e[0];});
+      var selectedAgentNames = Object.entries(f.selectedAgents||{}).filter(function(e){return e[1];}).map(function(e){return e[0].toLowerCase();});
+      var FIELD_CR=9969, FIELD_PROD=5807, FIELD_RES=11375, FIELD_ADDRES=11421;
+
+      console.log("[QA][fetch] Date filter (client-side) \u2014 start:", since, "end:", until||"none");
+      console.log("[QA][filter] Status:", filterByStatus ? activeStatuses.join(", ") : "all");
+
+      setFetchStatus("Searched 0 \u00b7 Matched 0");
+
       while(!reachedCutoff) {
-        if(fetchCancelRef.current) { setFetchStatus("Cancelled."); break; }
+        if(fetchCancelRef.current) { setFetchStatus("Cancelled \u2014 "+results.length+" matched."); break; }
         var params = { limit: 30 };
         if(cursor) params.cursor = cursor;
         var page = await gorgiasAPI("/tickets", params);
@@ -2767,199 +2897,137 @@ Rules:
         if(!data.length) break;
 
         for(var ti=0; ti<data.length; ti++) {
+          if(fetchCancelRef.current) break;
           var t = data[ti];
+          var tid = t.id;
           var created = (t.created_datetime||"").slice(0,19);
+
           if(until && created && created > until) continue;
           if(since && created && created < since) { reachedCutoff = true; break; }
           fc.raw++;
+
           if(filterByStatus) {
             var tStatus = (t.status||"").toLowerCase();
-            if(!activeStatuses.includes(tStatus)) {
-              console.log("[QA][filter] Skip #"+t.id+" status='"+tStatus+"' not in ["+activeStatuses+"]");
-              fc.skippedStatus++; continue;
-            }
+            if(!activeStatuses.includes(tStatus)) { fc.skippedStatus++; continue; }
           }
+
           if(cutoffSkip && t.closed_datetime) {
             var closedAt = (t.closed_datetime||"").slice(0,19);
-            if(closedAt && closedAt > cutoffSkip) {
-              console.log("[QA][filter] Skip #"+t.id+" closed recently ("+closedAt+")");
-              fc.skippedRecentlyClosed++; continue;
+            if(closedAt && closedAt > cutoffSkip) { fc.skippedRecentlyClosed++; continue; }
+          }
+
+          if(channels.length) {
+            if(!channels.includes((t.channel||t.via||"").toLowerCase())) { fc.skippedChannel++; continue; }
+          }
+
+          if(f.agentFilter==="Has agent assigned" && !t.assignee_user) { fc.skippedAgentFilter++; continue; }
+          if(f.agentFilter==="No agent assigned" && t.assignee_user)   { fc.skippedAgentFilter++; continue; }
+
+          var agentName = "";
+          if(t.assignee_user) {
+            var au = t.assignee_user;
+            agentName = au.name || ((au.firstname||"")+" "+(au.lastname||"")).trim();
+          }
+
+          if(selectedAgentNames.length && agentName && !selectedAgentNames.includes(agentName.toLowerCase())) {
+            fc.skippedAgentFilter++; continue;
+          }
+
+          var crParts     = parseTicketField(t, FIELD_CR);
+          var prodParts   = parseTicketField(t, FIELD_PROD);
+          var resParts    = parseTicketField(t, FIELD_RES);
+          var addResParts = parseTicketField(t, FIELD_ADDRES);
+
+          if(f.crL1 && crParts[0].toLowerCase() !== f.crL1.toLowerCase()) { fc.skippedCR++; continue; }
+          if(f.crL2 && f.crL2.trim() && crParts[1].toLowerCase() !== f.crL2.trim().toLowerCase()) { fc.skippedCR++; continue; }
+          if(f.prodL1 && prodParts[0].toLowerCase() !== f.prodL1.toLowerCase()) { fc.skippedCR++; continue; }
+          if(f.resL1 && resParts[0].toLowerCase() !== f.resL1.toLowerCase()) { fc.skippedRes++; continue; }
+          if(f.resL2 && f.resL2.trim() && resParts[1].toLowerCase() !== f.resL2.trim().toLowerCase()) { fc.skippedRes++; continue; }
+          if(f.addResL1 && addResParts[0].toLowerCase() !== f.addResL1.toLowerCase()) { fc.skippedRes++; continue; }
+          if(f.addResL2 && f.addResL2.trim() && addResParts[1].toLowerCase() !== f.addResL2.trim().toLowerCase()) { fc.skippedRes++; continue; }
+
+          if(deletedTicketIds.has(String(tid))) { fc.skippedDeleted++; continue; }
+
+          if(perAgent && agentName && (agentCounts[agentName]||0) >= perAgent) { fc.skippedAgentCap++; continue; }
+
+          // All cheap filters passed — update live counter before expensive message fetch
+          setFetchStatus("Searched "+fc.raw+" \u00b7 Matched "+results.length+(maxTickets?" / "+maxTickets:""));
+
+          // Fetch messages
+          var transcript = "";
+          var msgCount = 0;
+          for(var attempt=0; attempt<5; attempt++) {
+            try {
+              var msgResp = await gorgiasAPI("/tickets/"+tid+"/messages", {limit:100});
+              if(msgResp._status === 429) {
+                var wait = [10000,20000,40000,60000,120000][attempt];
+                setFetchStatus("Rate limited \u2014 pausing "+(wait/1000)+"s... (searched "+fc.raw+" \u00b7 matched "+results.length+")");
+                await new Promise(function(r){setTimeout(r,wait);});
+                continue;
+              }
+              var messages = msgResp.data || [];
+              msgCount = messages.length;
+              transcript = buildTranscript(messages);
+              break;
+            } catch(e) {
+              if(attempt===4) transcript = "Error: "+e.message;
+              else { await new Promise(function(r){setTimeout(r,5000*(attempt+1));}); }
             }
           }
-          allTickets.push(t);
+
+          var minMsg2 = parseInt(f.msgMin||"")||null;
+          var maxMsg2 = parseInt(f.msgMax||"")||null;
+          if(minMsg2 && msgCount < minMsg2) { fc.skippedMsgCount++; await new Promise(function(r){setTimeout(r,500);}); continue; }
+          if(maxMsg2 && msgCount > maxMsg2) { fc.skippedMsgCount++; await new Promise(function(r){setTimeout(r,500);}); continue; }
+
+          if(f.keyword && f.keyword.trim()) {
+            var haystack = (transcript + " " + (t.subject||"")).toLowerCase();
+            var kwWords = f.keyword.trim().toLowerCase().split(/[\s,]+/).filter(function(w){return w.length>0;});
+            var allMatch = kwWords.every(function(w){return haystack.includes(w);});
+            if(!allMatch) { fc.skippedKeyword++; await new Promise(function(r){setTimeout(r,500);}); continue; }
+          }
+
+          var customerEmail = (t.customer||{}).email || "";
+          var createdFmt = (t.created_datetime||"").slice(0,16).replace("T"," ");
+
+          results.push({
+            ticket_id:                String(tid),
+            ticket_url:               "https://"+((window.__ENV__&&window.__ENV__.GORGIAS_DOMAIN)||"freedomgrooming.gorgias.com")+"/app/ticket/"+tid,
+            subject:                  t.subject || "(no subject)",
+            status:                   t.status || "",
+            initial_channel:          t.channel || t.via || "",
+            created_date:             createdFmt,
+            agent:                    agentName,
+            customer_email:           customerEmail,
+            contact_reason_l1:        crParts[0],
+            contact_reason_l2:        crParts[1],
+            product_l1:               prodParts[0],
+            ticket_resolution_l1:     resParts[0],
+            ticket_resolution_l2:     resParts[1],
+            additional_resolution_l1: addResParts[0],
+            additional_resolution_l2: addResParts[1],
+            message_count:            msgCount,
+            transcript:               transcript,
+          });
+          fc.result++;
+
+          if(perAgent && agentName) {
+            agentCounts[agentName] = (agentCounts[agentName]||0) + 1;
+          }
+
+          setFetchStatus("Searched "+fc.raw+" \u00b7 Matched "+results.length+(maxTickets?" / "+maxTickets:""));
+          await new Promise(function(r){setTimeout(r,500);});
+
+          if(maxTickets && results.length >= maxTickets) {
+            console.log("[QA][fetch] Max results reached ("+maxTickets+") \u2014 stopping");
+            reachedCutoff = true; break;
+          }
         }
 
-        setFetchStatus("Fetched "+allTickets.length+" tickets...");
         var nextCursor = (page.meta||{}).next_cursor || page.next_cursor;
         if(!nextCursor || reachedCutoff) break;
         cursor = nextCursor;
-        await new Promise(function(r){setTimeout(r,100);}); // small delay to avoid Gorgias connection resets
-      }
-      console.log("[QA][filter] After date+status+skip:", allTickets.length, "tickets");
-
-      // Channel filter
-      var channels = Object.entries(f.channels).filter(function(e){return e[1];}).map(function(e){return e[0];});
-      if(channels.length) {
-        var preCh = allTickets.length;
-        allTickets = allTickets.filter(function(t){return channels.includes((t.channel||t.via||"").toLowerCase());});
-        fc.skippedChannel = preCh - allTickets.length;
-        console.log("[QA][filter] Channel ("+channels.join(",")+"):", preCh, "→", allTickets.length);
-      } else {
-        console.log("[QA][filter] Channel: all (none selected)");
-      }
-
-      // Agent assignment filter
-      if(f.agentFilter==="Has agent assigned") {
-        var preAg = allTickets.length;
-        allTickets = allTickets.filter(function(t){return t.assignee_user;});
-        fc.skippedAgentFilter = preAg - allTickets.length;
-        console.log("[QA][filter] Agent (has agent):", preAg, "→", allTickets.length);
-      } else if(f.agentFilter==="No agent assigned") {
-        var preAg2 = allTickets.length;
-        allTickets = allTickets.filter(function(t){return !t.assignee_user;});
-        fc.skippedAgentFilter = preAg2 - allTickets.length;
-        console.log("[QA][filter] Agent (no agent):", preAg2, "→", allTickets.length);
-      }
-
-      // Specific agent filter
-      var selectedAgentNames = Object.entries(f.selectedAgents||{}).filter(function(e){return e[1];}).map(function(e){return e[0].toLowerCase();});
-      if(selectedAgentNames.length) {
-        var preAgSel = allTickets.length;
-        allTickets = allTickets.filter(function(t){
-          var au = t.assignee_user;
-          var name = au ? (au.name||((au.firstname||"")+" "+(au.lastname||"")).trim()).toLowerCase() : "";
-          return selectedAgentNames.includes(name);
-        });
-        fc.skippedAgentFilter += preAgSel - allTickets.length;
-        console.log("[QA][filter] Specific agents ("+selectedAgentNames.join(",")+"):", preAgSel, "→", allTickets.length);
-      }
-
-      // Fetch messages and build transcripts
-      var results = [];
-      var perAgent = parseInt(f.ticketsPerAgent||"") || null;
-      if(perAgent) console.log("[QA][filter] Tickets per agent cap:", perAgent);
-      var agentCounts = {};
-      var FIELD_CR=9969, FIELD_PROD=5807, FIELD_RES=11375, FIELD_ADDRES=11421;
-      console.log("[QA][filter] Field filters — CR L1:", f.crL1||"any", "CR L2:", f.crL2||"any", "Res L1:", f.resL1||"any", "Res L2:", f.resL2||"any", "AddRes L1:", f.addResL1||"any", "AddRes L2:", f.addResL2||"any", "Keyword:", f.keyword||"none", "Msg min:", f.msgMin||"any", "Msg max:", f.msgMax||"any");
-
-      for(var i=0; i<allTickets.length; i++) {
-        if(fetchCancelRef.current) { setFetchStatus("Cancelled — "+results.length+" tickets collected."); break; }
-        var t = allTickets[i];
-        var tid = t.id;
-        setFetchStatus("Processing ticket "+(i+1)+" of "+allTickets.length+"... ("+results.length+" matched so far)");
-
-        var crParts   = parseTicketField(t, FIELD_CR);
-        var prodParts = parseTicketField(t, FIELD_PROD);
-        var resParts  = parseTicketField(t, FIELD_RES);
-        var addResParts = parseTicketField(t, FIELD_ADDRES);
-
-        // Apply ALL field filters BEFORE fetching messages (avoids unnecessary API calls)
-        if(f.crL1 && crParts[0].toLowerCase() !== f.crL1.toLowerCase()) { console.log("[QA][filter] Skip #"+tid+" CR L1='"+crParts[0]+"' ≠ '"+f.crL1+"'"); fc.skippedCR++; continue; }
-        if(f.crL2 && f.crL2.trim() && crParts[1].toLowerCase() !== f.crL2.trim().toLowerCase()) { console.log("[QA][filter] Skip #"+tid+" CR L2='"+crParts[1]+"' ≠ '"+f.crL2+"'"); fc.skippedCR++; continue; }
-        if(f.prodL1 && prodParts[0].toLowerCase() !== f.prodL1.toLowerCase()) { console.log("[QA][filter] Skip #"+tid+" Prod='"+prodParts[0]+"' ≠ '"+f.prodL1+"'"); fc.skippedCR++; continue; }
-        if(f.resL1 && resParts[0].toLowerCase() !== f.resL1.toLowerCase()) { console.log("[QA][filter] Skip #"+tid+" Res L1='"+resParts[0]+"' ≠ '"+f.resL1+"'"); fc.skippedRes++; continue; }
-        if(f.resL2 && f.resL2.trim() && resParts[1].toLowerCase() !== f.resL2.trim().toLowerCase()) { console.log("[QA][filter] Skip #"+tid+" Res L2='"+resParts[1]+"' ≠ '"+f.resL2+"'"); fc.skippedRes++; continue; }
-        if(f.addResL1 && addResParts[0].toLowerCase() !== f.addResL1.toLowerCase()) { console.log("[QA][filter] Skip #"+tid+" AddRes L1='"+addResParts[0]+"' ≠ '"+f.addResL1+"'"); fc.skippedRes++; continue; }
-        if(f.addResL2 && f.addResL2.trim() && addResParts[1].toLowerCase() !== f.addResL2.trim().toLowerCase()) { console.log("[QA][filter] Skip #"+tid+" AddRes L2='"+addResParts[1]+"' ≠ '"+f.addResL2+"'"); fc.skippedRes++; continue; }
-
-        // Skip tickets that were previously deleted/archived in Notion
-        if(deletedTicketIds.has(String(tid))) {
-          console.log("[QA][filter] Skip #"+tid+" — previously deleted in Notion");
-          fc.skippedDeleted++; continue;
-        }
-
-        var agentName = "";
-        if(t.assignee_user) {
-          var au = t.assignee_user;
-          agentName = au.name || ((au.firstname||"")+" "+(au.lastname||"")).trim();
-        }
-
-        // Skip agent if already at cap
-        if(perAgent && agentName && (agentCounts[agentName]||0) >= perAgent) {
-          console.log("[QA][filter] Skip #"+tid+" — agent '"+agentName+"' at cap ("+perAgent+")");
-          fc.skippedAgentCap++; continue;
-        }
-
-        // Only fetch messages for tickets that passed ALL field filters
-        // This dramatically reduces API calls when using field filters
-        // Fetch messages with retry on 429
-        var transcript = "";
-        var msgCount = 0;
-        var msgFetched = false;
-        for(var attempt=0; attempt<5; attempt++) {
-          try {
-            var msgResp = await gorgiasAPI("/tickets/"+tid+"/messages", {limit:100});
-            if(msgResp._status === 429) {
-              var wait = [10000,20000,40000,60000,120000][attempt];
-              setFetchStatus("Rate limited by Gorgias — pausing "+(wait/1000)+"s (attempt "+(attempt+1)+"/5)...");
-              await new Promise(function(r){setTimeout(r,wait);});
-              continue;
-            }
-            var messages = msgResp.data || [];
-            msgCount = messages.length;
-            var minMsg = parseInt(f.msgMin||"")||null;
-            var maxMsg = parseInt(f.msgMax||"")||null;
-            if(minMsg && msgCount < minMsg) { msgFetched=true; break; }
-            if(maxMsg && msgCount > maxMsg) { msgFetched=true; break; }
-            transcript = buildTranscript(messages);
-            msgFetched = true;
-            break;
-          } catch(e) {
-            if(attempt===4) transcript = "Error: "+e.message;
-            else { await new Promise(function(r){setTimeout(r,5000*(attempt+1));}); }
-          }
-        }
-        if(msgFetched && msgCount > 0) {
-          var minMsg2 = parseInt(f.msgMin||"")||null;
-          var maxMsg2 = parseInt(f.msgMax||"")||null;
-          if(minMsg2 && msgCount < minMsg2) { console.log("[QA][filter] Skip #"+tid+" msgCount="+msgCount+" < min="+minMsg2); fc.skippedMsgCount++; continue; }
-          if(maxMsg2 && msgCount > maxMsg2) { console.log("[QA][filter] Skip #"+tid+" msgCount="+msgCount+" > max="+maxMsg2); fc.skippedMsgCount++; continue; }
-        }
-
-        var customerEmail = (t.customer||{}).email || "";
-        var created = (t.created_datetime||"").slice(0,16).replace("T"," ");
-
-        // Keyword filter — ALL words must appear (AND logic) in transcript + subject
-        if(f.keyword && f.keyword.trim()) {
-          var haystack = (transcript + " " + (t.subject||"")).toLowerCase();
-          var kwWords = f.keyword.trim().toLowerCase().split(/\s+/).filter(function(w){return w.length>0;});
-          var allMatch = kwWords.every(function(w){return haystack.includes(w);});
-          if(!allMatch) { console.log("[QA][filter] Skip #"+tid+" keyword mismatch — looking for ["+kwWords.join(",")+"]"); fc.skippedKeyword++; continue; }
-        }
-        results.push({
-          ticket_id:           String(tid),
-          ticket_url:          "https://"+((window.__ENV__&&window.__ENV__.GORGIAS_DOMAIN)||"freedomgrooming.gorgias.com")+"/app/ticket/"+tid,
-          subject:             t.subject || "(no subject)",
-          status:              t.status || "",
-          initial_channel:     t.channel || t.via || "",
-          created_date:        created,
-          agent:               agentName,
-          customer_email:      customerEmail,
-          contact_reason_l1:   crParts[0],
-          contact_reason_l2:   crParts[1],
-          product_l1:          prodParts[0],
-          ticket_resolution_l1: resParts[0],
-          ticket_resolution_l2: resParts[1],
-          additional_resolution_l1: addResParts[0],
-          additional_resolution_l2: addResParts[1],
-          message_count:       msgCount,
-          transcript:          transcript,
-        });
-        fc.result++;
-
-        // Tickets per agent cap — counted after all filters so cap means N matching tickets
-        if(perAgent && agentName) {
-          agentCounts[agentName] = (agentCounts[agentName]||0) + 1;
-        }
-
-        // Max tickets caps final matched results, not the raw pull
-        if(maxTickets && results.length >= maxTickets) {
-          console.log("[QA][filter] Max results reached ("+maxTickets+") — stopping");
-          break;
-        }
-
-        // Small delay to avoid rate limiting
-        await new Promise(function(r){setTimeout(r,500);});
+        await new Promise(function(r){setTimeout(r,100);});
       }
 
       fc.result = results.length;
@@ -3237,7 +3305,7 @@ Rules:
       setDeletedTicketIds(deletedIds);
       console.log("[QA] Loaded",deletedIds.size,"deleted ticket IDs");
       setSyncStatus("Loading users...");
-      await loadUsersFromNotion(setup.configDbId);
+      await loadUsersFromNotion();
       setSyncStatus("Loading matrix...");
       var savedMatrix = await loadConfigFromNotion(setup.configDbId, "matrix");
       if(savedMatrix && Array.isArray(savedMatrix)) setMatrix(savedMatrix);
@@ -3465,6 +3533,33 @@ Rules:
   var batchPassRate=batchDone>0?Math.round(batchResults.filter(function(r){return r.passed;}).length/batchDone*100):0;
 
   if(!currentUser){
+    // Blocked screen — not in DB or account inactive
+    if(loginBlocked){
+      return(
+        <div style={{minHeight:"100vh",display:"flex",alignItems:"center",justifyContent:"center",background:"var(--color-background-secondary)"}}>
+          <div style={{background:"white",borderRadius:"16px",padding:"48px 40px",width:"400px",boxShadow:"0 4px 24px rgba(0,0,0,0.08)",textAlign:"center"}}>
+            <div style={{width:"52px",height:"52px",borderRadius:"50%",background:"var(--color-background-danger)",display:"flex",alignItems:"center",justifyContent:"center",margin:"0 auto 20px",fontSize:"24px"}}>
+              {loginBlocked.reason==="inactive"?"🔒":"🚫"}
+            </div>
+            <h2 style={{fontSize:"18px",fontWeight:600,color:"var(--color-text-primary)",margin:"0 0 8px"}}>
+              {loginBlocked.reason==="inactive"?"Account deactivated":"Access not granted"}
+            </h2>
+            <p style={{fontSize:"13px",color:"var(--color-text-secondary)",lineHeight:"1.6",margin:"0 0 12px"}}>
+              {loginBlocked.reason==="inactive"
+                ?"Your account has been deactivated. Contact your QA admin to restore access."
+                :"Your account isn't registered in Wingman yet. Contact your QA admin to get access."}
+            </p>
+            <p style={{fontSize:"11px",color:"var(--color-text-secondary)",fontFamily:"var(--font-mono)",margin:"0 0 28px",background:"var(--color-background-secondary)",padding:"6px 10px",borderRadius:"6px",wordBreak:"break-all"}}>
+              {loginBlocked.email}
+            </p>
+            <button onClick={function(){setLoginBlocked(null);setSessionToken("");sessionStorage.removeItem("qa_session");}}
+              style={{fontSize:"13px",padding:"9px 24px",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:"8px",cursor:"pointer",color:"var(--color-text-secondary)"}}>
+              Sign out
+            </button>
+          </div>
+        </div>
+      );
+    }
     if(ssoLoading){
       return(
         <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:"100vh",gap:"16px"}}>
@@ -4099,14 +4194,26 @@ Rules:
                             </div>
                             <div style={{fontSize:"12px",color:"var(--color-text-secondary)",marginTop:"2px",fontStyle:"italic"}}>"{existingDispute.justification}"</div>
                             {/* Show original AI note for comparison */}
-                            {reviewSelected.justifications&&reviewSelected.justifications[c.id]&&reviewSelected.justifications[c.id].reason&&(
-                              <div style={{marginTop:"8px",padding:"8px 10px",background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)",borderLeft:"2px solid var(--color-border-secondary)"}}>
-                                <div style={{fontSize:"10px",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.07em",color:"var(--color-text-secondary)",marginBottom:"4px"}}>Original AI note</div>
-                                <div style={{fontSize:"12px",color:"var(--color-text-secondary)",lineHeight:"1.5"}}>{reviewSelected.justifications[c.id].reason}
-                                  {reviewSelected.justifications[c.id].improve&&reviewSelected.justifications[c.id].improve!=="null"&&<span style={{color:"var(--color-text-info)"}}> ↑ {reviewSelected.justifications[c.id].improve}</span>}
+                            {(function(){
+                              var just = reviewSelected.justifications&&reviewSelected.justifications[c.id];
+                              var reason = just&&just.reason;
+                              var improve = just&&just.improve&&just.improve!=="null"?just.improve:null;
+                              var catNote = reviewSelected[c.id+"Note"]||reviewSelected[(c.label||"").replace(/\s+/g,"")+"Note"]||"";
+                              var displayText = reason || catNote || null;
+                              return (
+                                <div style={{marginTop:"8px",padding:"8px 10px",background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)",borderLeft:"2px solid var(--color-border-secondary)"}}>
+                                  <div style={{fontSize:"10px",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.07em",color:"var(--color-text-secondary)",marginBottom:"4px"}}>Original AI note</div>
+                                  {displayText?(
+                                    <div style={{fontSize:"12px",color:"var(--color-text-secondary)",lineHeight:"1.5"}}>
+                                      {displayText}
+                                      {improve&&<span style={{color:"var(--color-text-info)"}}> ↑ {improve}</span>}
+                                    </div>
+                                  ):(
+                                    <div style={{fontSize:"12px",color:"var(--color-text-secondary)",fontStyle:"italic",opacity:0.6}}>No AI note available for this category.</div>
+                                  )}
                                 </div>
-                              </div>
-                            )}
+                              );
+                            })()}
                             {/* Show rejection reason to agent */}
                             {isRejected&&existingDispute.rejectedReason&&(
                               <div style={{marginTop:"6px",padding:"6px 10px",background:"var(--color-background-danger)",borderRadius:"var(--border-radius-md)",fontSize:"12px",color:"var(--color-text-danger)"}}>

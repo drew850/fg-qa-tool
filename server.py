@@ -13,7 +13,7 @@ REDIRECT_URI        = BASE_URL + "/auth/callback"
 GORGIAS_DOMAIN      = os.environ.get("GORGIAS_DOMAIN", "freedomgrooming.gorgias.com")
 GORGIAS_USERNAME    = os.environ.get("GORGIAS_USERNAME", "")
 GORGIAS_API_KEY     = os.environ.get("GORGIAS_API_KEY", "")
-EMERGENCY_PIN       = os.environ.get("EMERGENCY_PIN", "")
+QA_USERS_DB_ID      = os.environ.get("QA_USERS_DB_ID", "3744e96c994180c9b8adcec4048bc6fb")
 
 ALLOWED_DOMAINS     = {"myfreebird.com", "freedom-grooming.com"}
 
@@ -209,6 +209,73 @@ CR_L2_OPTIONS = {
     ]
 }
 
+_users_cache      = None
+_users_cache_time = 0
+USERS_CACHE_TTL   = 300  # 5 minutes
+
+def fetch_qa_users_from_notion():
+    """Load active users from QA Users Notion DB. Cached for 5 minutes."""
+    global _users_cache, _users_cache_time
+    now = time.time()
+    if _users_cache is not None and (now - _users_cache_time) < USERS_CACHE_TTL:
+        return _users_cache
+    if not NOTION_TOKEN or not QA_USERS_DB_ID:
+        return []
+    users = []
+    cursor = None
+    has_more = True
+    while has_more:
+        body = {"page_size": 100, "filter": {"property": "Active", "checkbox": {"equals": True}}}
+        if cursor:
+            body["start_cursor"] = cursor
+        req = urllib.request.Request(
+            f"https://api.notion.com/v1/databases/{QA_USERS_DB_ID}/query",
+            data=json.dumps(body).encode(),
+            headers={
+                "Authorization": f"Bearer {NOTION_TOKEN}",
+                "Notion-Version": "2022-06-28",
+                "Content-Type": "application/json"
+            },
+            method="POST"
+        )
+        try:
+            resp = urllib.request.urlopen(req, timeout=10)
+            result = json.loads(resp.read())
+            for page in result.get("results", []):
+                props = page.get("properties", {})
+                email_arr = props.get("Email", {}).get("title", [])
+                email = email_arr[0]["text"]["content"].lower().strip() if email_arr else ""
+                name_arr  = props.get("Name", {}).get("rich_text", [])
+                name  = name_arr[0]["text"]["content"].strip() if name_arr else ""
+                role_prop = props.get("Role", {})
+                if "select" in role_prop and role_prop["select"]:
+                    role = role_prop["select"]["name"].lower().strip()
+                else:
+                    role_arr = role_prop.get("rich_text", [])
+                    role = role_arr[0]["text"]["content"].lower().strip() if role_arr else "view"
+                if email:
+                    users.append({"email": email, "name": name or email.split("@")[0], "role": role})
+            has_more = result.get("has_more", False)
+            cursor   = result.get("next_cursor")
+        except Exception as e:
+            print(f"[Users] Notion fetch failed: {e}")
+            break
+    _users_cache      = users
+    _users_cache_time = now
+    print(f"[Users] Loaded {len(users)} active users from QA Users DB")
+    return users
+
+def find_user_by_email(email):
+    """Return user dict if email matches any active Notion user, else domain-based view fallback."""
+    email_lower = email.lower().strip()
+    for u in fetch_qa_users_from_notion():
+        if u["email"] == email_lower:
+            return u
+    domain = email_lower.split("@")[-1] if "@" in email_lower else ""
+    if domain in ALLOWED_DOMAINS:
+        return {"email": email_lower, "name": email_lower.split("@")[0].replace(".", " ").title(), "role": "view"}
+    return None
+
 def inject_env(html: bytes) -> bytes:
     import json as _json
     snippet = (
@@ -218,7 +285,8 @@ def inject_env(html: bytes) -> bytes:
         f'GOOGLE_CLIENT_ID:"{GOOGLE_CLIENT_ID}",'
         f'BASE_URL:"{BASE_URL}",'
         f'GORGIAS_DOMAIN:"{GORGIAS_DOMAIN}",'
-        f'GORGIAS_CONFIGURED:{"true" if GORGIAS_USERNAME and GORGIAS_API_KEY else "false"}'
+        f'GORGIAS_CONFIGURED:{"true" if GORGIAS_USERNAME and GORGIAS_API_KEY else "false"},'
+        f'QA_USERS_DB_ID:"{QA_USERS_DB_ID}"'
         f'}};'
         f'window.__CR_L1_OPTIONS={_json.dumps(CR_L1_OPTIONS)};'
         f'window.__CR_L2_OPTIONS={_json.dumps(CR_L2_OPTIONS)};'
@@ -476,17 +544,14 @@ class Handler(BaseHTTPRequestHandler):
             pin_ok    = secrets.compare_digest(submitted_pin, EMERGENCY_PIN)
             domain    = submitted_email.split("@")[-1] if "@" in submitted_email else ""
             domain_ok = domain in ALLOWED_DOMAINS
+            user      = find_user_by_email(submitted_email) if (pin_ok and domain_ok) else None
 
-            # Look up user in active sessions or just validate domain
-            # (Role assignment happens in the frontend via USERS list;
-            #  server only issues a valid session for a known domain.)
-            if not (pin_ok and domain_ok and submitted_email):
-                # Generic message — don't reveal which check failed
+            if not (pin_ok and domain_ok and submitted_email and user):
                 html, status = render_emergency("Invalid email or PIN.")
                 self._html(html, 401)
                 return
 
-            name          = submitted_email.split("@")[0].replace(".", " ").title()
+            name          = user.get("name", submitted_email.split("@")[0].replace(".", " ").title())
             session_token = create_session(submitted_email, name, via="emergency")
             self._redirect(f"{BASE_URL}/?session={session_token}")
             return
