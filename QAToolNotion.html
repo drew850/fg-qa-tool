@@ -2,10 +2,23 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.45
+  Version:  2.0.46
   Date:     2026-06-04
 
   Changelog:
+  v2.0.46 (2026-06-04)
+    - Delete & Replace flow — multi-step modal replacing window.confirm/prompt
+    - Step 0: Intent modal (Delete only / Delete & Replace / Cancel)
+    - Step 1: Min message count input (prefilled 4)
+    - Step 2: Gorgias search — same agent, same ISO week, not audited/deleted, msg >= min
+    - Step 2a: No result — original ticket not deleted, modal closes cleanly
+    - Step 3: Replacement preview — ticket ID, agent, created, msgs, CR
+    - Step 4: Haiku scoring + save to Notion (same auditor as original)
+    - Step 4a: Scoring fails — original not deleted, error shown
+    - Step 5: Soft delete original only after scoring succeeds
+    - replacedFor field saved on replacement ticket for audit trail
+    - Debug console logs at every step prefixed [Replace][N]
+
   v2.0.45 (2026-06-04)
     - Fix: agent role missing from Settings role dropdowns — defaulted to Full
     - Add agent option to existing user role dropdown and new user form
@@ -499,7 +512,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.45";
+const APP_VERSION = "v2.0.46";
 const REPORTS_DB_ID = "3684e96c994180db8929c67f306c554a";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
@@ -1300,6 +1313,17 @@ function App() {
   const [savingAutofail,setSavingAutofail]=useState(false);
   const [removeAutofailPrompt,setRemoveAutofailPrompt]=useState(false);
   const [removeAutofailReason,setRemoveAutofailReason]=useState("");
+
+  // Delete & Replace modal state
+  const [deleteModal,setDeleteModal]=useState(null);
+  // deleteModal shape:
+  // {
+  //   step: "intent" | "minMsg" | "searching" | "found" | "notFound" | "scoring" | "error"
+  //   ticket: <the ticket being deleted>
+  //   minMsg: 4
+  //   replacement: null | { id, subject, agent, created, msgCount, crL1, crL2, transcript }
+  //   error: ""
+  // }
   // Agent dispute approval
   const [approvalState,setApprovalState]=useState({}); // {catId: {action:"approve"|"reject", reason:""}}
   const [savingApproval,setSavingApproval]=useState(false);
@@ -1475,33 +1499,266 @@ function App() {
     setTimeout(function(){setToasts(function(t){return t.filter(function(x){return x.id!==id;});});},3500);
   }
 
-  async function deleteAudit(ticket) {
-    var justification = "";
-    if(isFullAccess) {
-      if(!window.confirm("Delete audit for ticket #"+ticket.ticketId+"? This will archive it and remove it from all views.")) return;
-    } else {
-      // Edit users must provide justification
-      justification = window.prompt("Please provide a reason for deleting this audit (ticket #"+ticket.ticketId+"):");
-      if(justification===null) return; // cancelled
-      if(!justification.trim()) { addToast("A justification is required to delete an audit","error"); return; }
+  // ── Delete & Replace helpers ──────────────────────────────────────────────
+
+  function getWeekBounds(dateStr) {
+    // Returns Mon 00:00 → Sun 23:59 of the week containing dateStr
+    var d = new Date(dateStr);
+    var day = d.getUTCDay(); // 0=Sun, 1=Mon...
+    var diffToMon = (day===0) ? -6 : 1 - day;
+    var mon = new Date(d);
+    mon.setUTCDate(d.getUTCDate() + diffToMon);
+    mon.setUTCHours(0,0,0,0);
+    var sun = new Date(mon);
+    sun.setUTCDate(mon.getUTCDate() + 6);
+    sun.setUTCHours(23,59,59,999);
+    return { start: mon.toISOString().slice(0,19), end: sun.toISOString().slice(0,19) };
+  }
+
+  async function findReplacementTicket(ticket, minMsg) {
+    console.log("[Replace][1] Finding replacement for ticket #"+ticket.ticketId);
+    console.log("[Replace][1] Agent:", ticket.agentName, "| Week start based on created:", ticket.createdDate||ticket.savedAt);
+
+    var agentName = ticket.agentName||"";
+    if(!agentName) { console.log("[Replace][1] No agent name — cannot find replacement"); return null; }
+
+    // Determine week bounds from ticket's created date
+    var createdDate = ticket.createdDate||ticket.savedAt||new Date().toISOString();
+    var week = getWeekBounds(createdDate);
+    console.log("[Replace][1] Week bounds:", week.start, "→", week.end);
+
+    // Build set of already-used ticket IDs
+    var usedIds = new Set(
+      tickets.map(function(t){return String(t.ticketId);})
+             .concat(Array.from(deletedTicketIds))
+    );
+    console.log("[Replace][1] Excluding", usedIds.size, "already-audited/deleted ticket IDs");
+
+    // Fetch pages from Gorgias until we find candidates or exhaust the week
+    var candidates = [];
+    var cursor = null;
+    var reachedCutoff = false;
+    var pagesFetched = 0;
+
+    while(!reachedCutoff) {
+      var params = { limit: 30 };
+      if(cursor) params.cursor = cursor;
+      console.log("[Replace][2] Fetching Gorgias page", pagesFetched+1, "...");
+      var page = await gorgiasAPI("/tickets", params);
+      var data = page.data||[];
+      if(!data.length) break;
+      pagesFetched++;
+
+      for(var i=0; i<data.length; i++) {
+        var t = data[i];
+        var created = (t.created_datetime||"").slice(0,19);
+
+        // Past the week — stop
+        if(created && created < week.start) { reachedCutoff = true; break; }
+        // Before the week — skip (too new, Gorgias is newest-first)
+        if(created && created > week.end) continue;
+
+        // Must be same agent
+        var au = t.assignee_user;
+        var tAgent = au ? (au.name||((au.firstname||"")+" "+(au.lastname||"")).trim()) : "";
+        if(tAgent.toLowerCase() !== agentName.toLowerCase()) {
+          console.log("[Replace][2] Skip #"+t.id+" — wrong agent ('"+tAgent+"')");
+          continue;
+        }
+
+        // Must not already be audited/deleted
+        if(usedIds.has(String(t.id))) {
+          console.log("[Replace][2] Skip #"+t.id+" — already audited or deleted");
+          continue;
+        }
+
+        // Fetch message count
+        console.log("[Replace][2] Checking msg count for #"+t.id+"...");
+        try {
+          var msgResp = await gorgiasAPI("/tickets/"+t.id+"/messages", {limit:100});
+          var msgs = msgResp.data||[];
+          var msgCount = msgs.length;
+          console.log("[Replace][2] Ticket #"+t.id+" — msgs:", msgCount, "min required:", minMsg);
+          if(msgCount < minMsg) { console.log("[Replace][2] Skip — below min msg count"); continue; }
+
+          // Build transcript while we have the messages
+          var transcript = buildTranscript(msgs);
+          var crParts = parseTicketField(t, 9969);
+
+          candidates.push({
+            id: String(t.id),
+            subject: t.subject||"(no subject)",
+            agent: tAgent,
+            created: created,
+            msgCount: msgCount,
+            crL1: crParts[0]||"",
+            crL2: crParts[1]||"",
+            transcript: transcript,
+            ticketUrl: "https://"+((window.__ENV__&&window.__ENV__.GORGIAS_DOMAIN)||"freedomgrooming.gorgias.com")+"/app/ticket/"+t.id,
+          });
+          console.log("[Replace][2] ✓ Candidate found: #"+t.id+" ("+msgCount+" msgs, CR: "+crParts[0]+")");
+        } catch(e) {
+          console.log("[Replace][2] Skip #"+t.id+" — msg fetch failed:", e.message);
+        }
+        await new Promise(function(r){setTimeout(r,500);});
+      }
+
+      var nextCursor = (page.meta||{}).next_cursor||page.next_cursor;
+      if(!nextCursor||reachedCutoff) break;
+      cursor = nextCursor;
+      await new Promise(function(r){setTimeout(r,100);});
     }
+
+    console.log("[Replace][2] Search complete. Candidates found:", candidates.length);
+    if(!candidates.length) return null;
+
+    // Pick randomly
+    var picked = candidates[Math.floor(Math.random()*candidates.length)];
+    console.log("[Replace][2] Randomly selected:", picked.id);
+    return picked;
+  }
+
+  async function scoreAndSaveReplacement(replacement, originalTicket) {
+    console.log("[Replace][3] Scoring replacement ticket #"+replacement.id+"...");
+
+    // Build ticket object matching batch QA format
+    var auditor = originalTicket.auditor||originalTicket.reviewer||originalTicket.auditedBy||currentUser.name;
+    var week = ticketWeekLabel(replacement.created)||ticketWeekLabel(new Date().toISOString().slice(0,10));
+
+    var ticketObj = {
+      ticketId:      replacement.id,
+      ticketUrl:     replacement.ticketUrl,
+      agentName:     replacement.agent,
+      transcript:    replacement.transcript,
+      subject:       replacement.subject,
+      contactReason: replacement.crL1+(replacement.crL2?"::"+replacement.crL2:""),
+      createdDate:   replacement.created.slice(0,10),
+      customerEmail: "",
+      reviewer:      auditor,
+    };
+
+    // Score via Claude Haiku (same as batch QA)
+    var rawTxt = await callClaudeWithRetry(buildEvalPrompt(ticketObj));
+    console.log("[Replace][3] Claude response received");
+    var cleanTxt = rawTxt.replace(/```(?:json)?\s*/g,"").replace(/```/g,"").trim();
+    var jsonMatch = cleanTxt.match(/\{[\s\S]+\}/);
+    if(!jsonMatch) throw new Error("No JSON in Claude response");
+    var parsed = JSON.parse(jsonMatch[0]);
+    var sc = calcScore(parsed.scores||{}, matrix);
+    var hasAF = (parsed.autofails||[]).length > 0;
+
+    var newResult = {
+      id:            Date.now(),
+      week:          week,
+      auditWeek:     week,
+      reviewer:      auditor,
+      agentName:     replacement.agent,
+      ticketId:      String(replacement.id),
+      ticketUrl:     replacement.ticketUrl,
+      createdDate:   replacement.created.slice(0,10),
+      contactReason: parsed.meta&&parsed.meta.contactReason||replacement.crL1,
+      product:       parsed.meta&&parsed.meta.product||"",
+      ticketResolution: parsed.meta&&parsed.meta.ticketResolution||"",
+      scores:        parsed.scores||{},
+      aiScores:      parsed.scores||{},
+      autofails:     parsed.autofails||[],
+      autofail:      hasAF,
+      comments:      parsed.comments||"",
+      totalPoints:   sc?sc.pts:0,
+      maxPoints:     sc?sc.max:0,
+      finalScore:    sc?sc.pct:0,
+      aiScore:       sc?sc.pct:0,
+      passed:        !hasAF&&(sc?sc.pct:0)>=85,
+      hasDisputes:   false,
+      disputes:      {},
+      justifications:parsed.justifications||{},
+      customerEmail: "",
+      savedAt:       new Date().toISOString(),
+      replacedFor:   String(originalTicket.ticketId), // audit trail
+    };
+
+    console.log("[Replace][4] Saving replacement to Notion. Auditor:", auditor, "Passed:", newResult.passed);
+    await saveTicketToNotion(TICKETS_DB_ID, newResult);
+    setTickets(function(prev){return prev.concat([newResult]);});
+    console.log("[Replace][4] Saved successfully");
+    return newResult;
+  }
+
+  function handleDeleteClick(ticket) {
+    // Step 0 — show intent modal
+    console.log("[Replace][0] Delete clicked for ticket #"+ticket.ticketId);
+    setDeleteModal({ step:"intent", ticket, minMsg:4, replacement:null, error:"" });
+  }
+
+  async function handleDeleteProceed() {
+    var dm = deleteModal;
+    if(!dm) return;
+
+    if(dm.step==="minMsg") {
+      // Start search
+      console.log("[Replace][1] Starting replacement search. Min msgs:", dm.minMsg);
+      setDeleteModal(function(d){return Object.assign({},d,{step:"searching"});});
+      try {
+        var result = await findReplacementTicket(dm.ticket, parseInt(dm.minMsg)||4);
+        if(!result) {
+          console.log("[Replace][2] No replacement found — blocking delete");
+          setDeleteModal(function(d){return Object.assign({},d,{step:"notFound"});});
+        } else {
+          console.log("[Replace][2] Replacement found:", result.id);
+          setDeleteModal(function(d){return Object.assign({},d,{step:"found",replacement:result});});
+        }
+      } catch(e) {
+        console.log("[Replace] Search failed:", e.message);
+        setDeleteModal(function(d){return Object.assign({},d,{step:"error",error:"Search failed: "+e.message});});
+      }
+      return;
+    }
+
+    if(dm.step==="found") {
+      // User confirmed replacement — score it
+      console.log("[Replace][3] User confirmed replacement #"+dm.replacement.id+". Starting scoring...");
+      setDeleteModal(function(d){return Object.assign({},d,{step:"scoring"});});
+      try {
+        await scoreAndSaveReplacement(dm.replacement, dm.ticket);
+        // Scoring succeeded — NOW delete the original
+        console.log("[Replace][5] Scoring succeeded. Deleting original ticket #"+dm.ticket.ticketId+"...");
+        await deleteAuditDirectly(dm.ticket, "Replaced by ticket #"+dm.replacement.id);
+        setDeleteModal(null);
+        addToast("Ticket #"+dm.ticket.ticketId+" replaced with #"+dm.replacement.id);
+        console.log("[Replace][6] Done. Replacement #"+dm.replacement.id+" is now in Review tab.");
+      } catch(e) {
+        console.log("[Replace][4] Scoring/save failed — original NOT deleted:", e.message);
+        setDeleteModal(function(d){return Object.assign({},d,{step:"error",error:"Scoring failed: "+e.message+". Original ticket not deleted."});});
+      }
+      return;
+    }
+  }
+
+  async function deleteAuditDirectly(ticket, reason) {
+    // Actual soft-delete — only called after replacement is confirmed or for delete-only
     try {
       if(ticket.notionPageId) {
-        var now=new Date().toISOString();
-        await notionAPI("/v1/pages/"+ticket.notionPageId, "PATCH", {properties:{
-          "Deleted":      {checkbox: true},
+        var now = new Date().toISOString();
+        await notionAPI("/v1/pages/"+ticket.notionPageId,"PATCH",{properties:{
+          "Deleted":      {checkbox:true},
           "Deleted By":   {rich_text:[{text:{content:currentUser.name}}]},
           "Deleted At":   {rich_text:[{text:{content:now}}]},
-          "Delete Reason":{rich_text:[{text:{content:justification.trim()||"Deleted by "+currentUser.role+" user"}}]}
+          "Delete Reason":{rich_text:[{text:{content:(reason||"Deleted by "+currentUser.role+" user").slice(0,1990)}}]},
         }});
       }
       setTickets(function(ts){return ts.filter(function(t){return t.notionPageId!==ticket.notionPageId;});});
       setReviewSelected(null);
       setDisputeState({});
-      addToast("Audit #"+ticket.ticketId+" deleted");
+      if(!reason) addToast("Audit #"+ticket.ticketId+" deleted");
     } catch(e) {
       addToast("Delete failed: "+e.message,"error");
+      throw e;
     }
+  }
+
+  async function deleteAudit(ticket) {
+    // Legacy wrapper — now routes through modal
+    handleDeleteClick(ticket);
   }
 
   async function saveReviewed(ticket, reviewerNotes) {
@@ -4043,7 +4300,7 @@ Rules:
                       <button onClick={function(){setRemoveAutofailPrompt(true);}} style={{...ghost,fontSize:"12px",color:"var(--color-text-warning)",borderColor:"var(--color-border-warning)"}}>✕ Remove autofail</button>
                     )
                   )}
-                  {isEditor&&<button onClick={function(){deleteAudit(reviewSelected);}} style={{...ghost,fontSize:"12px",color:"var(--color-text-danger)",borderColor:"var(--color-border-danger)"}}>🗑 Delete audit</button>}
+                  {isEditor&&<button onClick={function(){handleDeleteClick(reviewSelected);}} style={{...ghost,fontSize:"12px",color:"var(--color-text-danger)",borderColor:"var(--color-border-danger)"}}>🗑 Delete audit</button>}
                 </div>
               </div>
 
@@ -5939,6 +6196,132 @@ Rules:
                 </div>
               )}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Delete & Replace Modal ── */}
+      {deleteModal&&(
+        <div style={{position:"fixed",inset:0,zIndex:2000,background:"rgba(0,0,0,0.5)",display:"flex",alignItems:"center",justifyContent:"center",padding:"24px"}}>
+          <div style={{background:"white",borderRadius:"16px",padding:"32px",width:"460px",maxWidth:"100%",boxShadow:"0 8px 32px rgba(0,0,0,0.18)"}}>
+
+            {/* Step 0 — Intent */}
+            {deleteModal.step==="intent"&&(<>
+              <h3 style={{fontSize:"16px",fontWeight:600,margin:"0 0 8px",color:"var(--color-text-primary)"}}>Delete audit</h3>
+              <p style={{fontSize:"13px",color:"var(--color-text-secondary)",margin:"0 0 24px"}}>
+                Ticket <span style={{fontFamily:"var(--font-mono)",fontWeight:600}}>#{deleteModal.ticket.ticketId}</span> · {deleteModal.ticket.agentName||"Unknown agent"}
+              </p>
+              <div style={{display:"flex",flexDirection:"column",gap:"10px"}}>
+                <button onClick={function(){setDeleteModal(function(d){return Object.assign({},d,{step:"minMsg"});});}}
+                  style={{...btnInfo,padding:"11px",fontSize:"13px",textAlign:"left",display:"flex",flexDirection:"column",gap:"2px"}}>
+                  <span style={{fontWeight:600}}>Delete &amp; Replace</span>
+                  <span style={{fontSize:"11px",opacity:0.8}}>Find a new ticket from the same agent and week, score it automatically</span>
+                </button>
+                <button onClick={function(){var t=deleteModal.ticket;setDeleteModal(null);deleteAuditDirectly(t);}}
+                  style={{...ghost,padding:"11px",fontSize:"13px",color:"var(--color-text-danger)",borderColor:"var(--color-border-danger)",textAlign:"left"}}>
+                  <span style={{fontWeight:600}}>Delete only</span>
+                </button>
+                <button onClick={function(){setDeleteModal(null);}} style={{...ghost,padding:"11px",fontSize:"13px"}}>Cancel</button>
+              </div>
+            </>)}
+
+            {/* Step 1 — Min message count */}
+            {deleteModal.step==="minMsg"&&(<>
+              <h3 style={{fontSize:"16px",fontWeight:600,margin:"0 0 8px",color:"var(--color-text-primary)"}}>Replacement criteria</h3>
+              <p style={{fontSize:"13px",color:"var(--color-text-secondary)",margin:"0 0 20px"}}>
+                Searching for tickets from <strong>{deleteModal.ticket.agentName}</strong> during the same week with at least:
+              </p>
+              <label style={{...lbl,marginBottom:"6px"}}>Minimum message count</label>
+              <input type="number" min="1" step="1"
+                value={deleteModal.minMsg}
+                onChange={function(e){var v=e.target.value.replace(/[^0-9]/g,"");setDeleteModal(function(d){return Object.assign({},d,{minMsg:v||"1"});});}}
+                style={{width:"100%",boxSizing:"border-box",fontSize:"14px",padding:"9px 12px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",marginBottom:"20px"}}
+                autoFocus/>
+              <div style={{display:"flex",gap:"10px"}}>
+                <button onClick={handleDeleteProceed} style={{...btnInfo,padding:"10px 24px",fontSize:"13px",flex:1}}>Search</button>
+                <button onClick={function(){setDeleteModal(null);}} style={{...ghost,padding:"10px 24px",fontSize:"13px"}}>Cancel</button>
+              </div>
+            </>)}
+
+            {/* Searching */}
+            {deleteModal.step==="searching"&&(<>
+              <div style={{textAlign:"center",padding:"16px 0"}}>
+                <div style={{width:"28px",height:"28px",border:"3px solid var(--color-border-info)",borderTop:"3px solid var(--color-text-info)",borderRadius:"50%",animation:"spin 0.8s linear infinite",margin:"0 auto 16px"}}/>
+                <p style={{fontSize:"14px",fontWeight:500,color:"var(--color-text-primary)",margin:"0 0 6px"}}>Searching Gorgias...</p>
+                <p style={{fontSize:"12px",color:"var(--color-text-secondary)",margin:0}}>
+                  Looking for {deleteModal.ticket.agentName} tickets this week with ≥{deleteModal.minMsg} messages
+                </p>
+              </div>
+            </>)}
+
+            {/* Not found */}
+            {deleteModal.step==="notFound"&&(<>
+              <div style={{textAlign:"center",padding:"8px 0 16px"}}>
+                <div style={{fontSize:"36px",marginBottom:"12px"}}>🔍</div>
+                <h3 style={{fontSize:"16px",fontWeight:600,margin:"0 0 8px",color:"var(--color-text-primary)"}}>No replacement found</h3>
+                <p style={{fontSize:"13px",color:"var(--color-text-secondary)",margin:"0 0 20px",lineHeight:"1.6"}}>
+                  No eligible tickets found for <strong>{deleteModal.ticket.agentName}</strong> this week with ≥{deleteModal.minMsg} messages that haven't already been audited or deleted.
+                </p>
+                <p style={{fontSize:"12px",color:"var(--color-text-warning)",margin:"0 0 20px",fontWeight:600}}>
+                  Ticket #{deleteModal.ticket.ticketId} was not deleted.
+                </p>
+                <button onClick={function(){setDeleteModal(null);}} style={{...ghost,padding:"10px 24px",fontSize:"13px"}}>Close</button>
+              </div>
+            </>)}
+
+            {/* Found — confirm */}
+            {deleteModal.step==="found"&&deleteModal.replacement&&(<>
+              <h3 style={{fontSize:"16px",fontWeight:600,margin:"0 0 6px",color:"var(--color-text-primary)"}}>Replacement found</h3>
+              <p style={{fontSize:"12px",color:"var(--color-text-secondary)",margin:"0 0 16px"}}>Review the replacement ticket before confirming.</p>
+              <div style={{background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)",padding:"14px 16px",marginBottom:"20px",border:"0.5px solid var(--color-border-tertiary)"}}>
+                <div style={{display:"flex",justifyContent:"space-between",marginBottom:"6px"}}>
+                  <span style={{fontFamily:"var(--font-mono)",fontWeight:700,color:"var(--color-text-info)",fontSize:"13px"}}>#{deleteModal.replacement.id}</span>
+                  <span style={{fontSize:"11px",color:"var(--color-text-secondary)"}}>{deleteModal.replacement.msgCount} messages</span>
+                </div>
+                <div style={{fontSize:"12px",color:"var(--color-text-primary)",marginBottom:"4px",fontWeight:500}}>{deleteModal.replacement.subject}</div>
+                <div style={{fontSize:"11px",color:"var(--color-text-secondary)"}}>
+                  {deleteModal.replacement.agent} · Created {deleteModal.replacement.created.slice(0,10)}
+                  {deleteModal.replacement.crL1&&<span> · {deleteModal.replacement.crL1}{deleteModal.replacement.crL2&&"::"+deleteModal.replacement.crL2}</span>}
+                </div>
+              </div>
+              <div style={{display:"flex",gap:"10px"}}>
+                <button onClick={handleDeleteProceed} style={{...btnSuccess,padding:"10px 24px",fontSize:"13px",flex:1}}>
+                  Confirm &amp; Score
+                </button>
+                <button onClick={function(){setDeleteModal(null);}} style={{...ghost,padding:"10px 24px",fontSize:"13px"}}>Cancel</button>
+              </div>
+              <p style={{fontSize:"11px",color:"var(--color-text-secondary)",marginTop:"10px",marginBottom:0}}>
+                Original ticket #{deleteModal.ticket.ticketId} will only be deleted after scoring succeeds.
+              </p>
+            </>)}
+
+            {/* Scoring */}
+            {deleteModal.step==="scoring"&&(<>
+              <div style={{textAlign:"center",padding:"16px 0"}}>
+                <div style={{width:"28px",height:"28px",border:"3px solid var(--color-border-success)",borderTop:"3px solid var(--color-text-success)",borderRadius:"50%",animation:"spin 0.8s linear infinite",margin:"0 auto 16px"}}/>
+                <p style={{fontSize:"14px",fontWeight:500,color:"var(--color-text-primary)",margin:"0 0 6px"}}>Scoring replacement...</p>
+                <p style={{fontSize:"12px",color:"var(--color-text-secondary)",margin:"0 0 4px"}}>
+                  Ticket #{deleteModal.replacement&&deleteModal.replacement.id}
+                </p>
+                <p style={{fontSize:"11px",color:"var(--color-text-secondary)",margin:0}}>
+                  Original ticket #{deleteModal.ticket.ticketId} has not been deleted yet.
+                </p>
+              </div>
+            </>)}
+
+            {/* Error */}
+            {deleteModal.step==="error"&&(<>
+              <div style={{textAlign:"center",padding:"8px 0 16px"}}>
+                <div style={{fontSize:"36px",marginBottom:"12px"}}>⚠️</div>
+                <h3 style={{fontSize:"16px",fontWeight:600,margin:"0 0 8px",color:"var(--color-text-danger)"}}>Something went wrong</h3>
+                <p style={{fontSize:"13px",color:"var(--color-text-secondary)",margin:"0 0 8px",lineHeight:"1.6"}}>{deleteModal.error}</p>
+                <p style={{fontSize:"12px",fontWeight:600,color:"var(--color-text-warning)",margin:"0 0 20px"}}>
+                  Ticket #{deleteModal.ticket.ticketId} was not deleted.
+                </p>
+                <button onClick={function(){setDeleteModal(null);}} style={{...ghost,padding:"10px 24px",fontSize:"13px"}}>Close</button>
+              </div>
+            </>)}
+
           </div>
         </div>
       )}
