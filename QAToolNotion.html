@@ -2,10 +2,15 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.53
+  Version:  2.0.54
   Date:     2026-06-06
 
   Changelog:
+  v2.0.54 (2026-06-06)
+    - Fix: "return outside of function" — App function was closing at line 1917
+    - Caused by orphaned handleDeleteClick body left outside App when reaudit functions were added
+    - Reconstructed handleDeleteClick inside App, App now closes correctly at end of file
+
   v2.0.53 (2026-06-06)
     - Fix: sectionLabel const/var conflict — same root cause as v2.0.52
     - Full scan confirmed no further const/var conflicts remain
@@ -557,7 +562,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.53";
+const APP_VERSION = "v2.0.54";
 const REPORTS_DB_ID = "3684e96c994180db8929c67f306c554a";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
@@ -1911,7 +1916,8 @@ function App() {
       return;
     }
   }
-    // Step 0 — show intent modal
+
+  function handleDeleteClick(ticket) {
     console.log("[Replace][0] Delete clicked for ticket #"+ticket.ticketId);
     setDeleteModal({ step:"intent", ticket, minMsg:4, replacement:null, error:"" });
   }
