@@ -2,10 +2,24 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.46
-  Date:     2026-06-04
+  Version:  2.0.48
+  Date:     2026-06-05
 
   Changelog:
+  v2.0.48 (2026-06-05)
+    - Fix: results, perAgent, agentCounts not declared — caused "results is not defined" error in fetch tab
+    - Variables were lost when two-phase fetch was merged into single streaming loop in v2.0.42
+
+  v2.0.47 (2026-06-05)
+    - Fix: Replace search and fetch tab now skip-fast through pages newer than target window
+    - Pages where ALL tickets are newer than until/week.end skipped with zero delay
+    - Eliminates 429 rate limit from rapid page fetching during burn phase
+    - Replace search: add 429 retry with backoff at page level (5 attempts)
+    - Fetch tab: add fc.scanned counter showing all tickets seen from Gorgias
+    - Status shows "Scanning — skipped X recent tickets" during burn phase
+    - Filter summary shows Scanned + In date range as separate rows
+    - Replace modal shows week date and "skipping recent pages" note during search
+
   v2.0.46 (2026-06-04)
     - Delete & Replace flow — multi-step modal replacing window.confirm/prompt
     - Step 0: Intent modal (Delete only / Delete & Replace / Cancel)
@@ -512,7 +526,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.46";
+const APP_VERSION = "v2.0.48";
 const REPORTS_DB_ID = "3684e96c994180db8929c67f306c554a";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
@@ -1517,46 +1531,82 @@ function App() {
 
   async function findReplacementTicket(ticket, minMsg) {
     console.log("[Replace][1] Finding replacement for ticket #"+ticket.ticketId);
-    console.log("[Replace][1] Agent:", ticket.agentName, "| Week start based on created:", ticket.createdDate||ticket.savedAt);
+    console.log("[Replace][1] Agent:", ticket.agentName, "| Created:", ticket.createdDate||ticket.savedAt);
 
     var agentName = ticket.agentName||"";
     if(!agentName) { console.log("[Replace][1] No agent name — cannot find replacement"); return null; }
 
-    // Determine week bounds from ticket's created date
     var createdDate = ticket.createdDate||ticket.savedAt||new Date().toISOString();
     var week = getWeekBounds(createdDate);
     console.log("[Replace][1] Week bounds:", week.start, "→", week.end);
 
-    // Build set of already-used ticket IDs
     var usedIds = new Set(
       tickets.map(function(t){return String(t.ticketId);})
              .concat(Array.from(deletedTicketIds))
     );
-    console.log("[Replace][1] Excluding", usedIds.size, "already-audited/deleted ticket IDs");
+    console.log("[Replace][1] Excluding", usedIds.size, "already-audited/deleted IDs");
 
-    // Fetch pages from Gorgias until we find candidates or exhaust the week
     var candidates = [];
     var cursor = null;
     var reachedCutoff = false;
     var pagesFetched = 0;
+    var inWindow = false; // true once we've reached the target week
 
     while(!reachedCutoff) {
-      var params = { limit: 30 };
-      if(cursor) params.cursor = cursor;
-      console.log("[Replace][2] Fetching Gorgias page", pagesFetched+1, "...");
-      var page = await gorgiasAPI("/tickets", params);
+      // Fetch page with 429 retry
+      var page = null;
+      for(var attempt=0; attempt<5; attempt++) {
+        try {
+          var params = { limit: 30 };
+          if(cursor) params.cursor = cursor;
+          var resp = await gorgiasAPI("/tickets", params);
+          if(resp._status === 429) {
+            var wait = [10000,20000,40000,60000,120000][attempt];
+            console.log("[Replace][2] 429 rate limit — waiting "+(wait/1000)+"s (attempt "+(attempt+1)+"/5)");
+            setDeleteModal(function(d){return Object.assign({},d,{_status:"Rate limited by Gorgias — pausing "+(wait/1000)+"s..."});});
+            await new Promise(function(r){setTimeout(r,wait);});
+            continue;
+          }
+          page = resp;
+          break;
+        } catch(e) {
+          if(attempt===4) throw e;
+          await new Promise(function(r){setTimeout(r,3000*(attempt+1));});
+        }
+      }
+      if(!page) break;
+
       var data = page.data||[];
       if(!data.length) break;
       pagesFetched++;
+
+      // Quick scan: check if ALL tickets on this page are newer than week.end
+      var allTooNew = data.every(function(t){
+        var c = (t.created_datetime||"").slice(0,19);
+        return c > week.end;
+      });
+
+      if(allTooNew) {
+        // Skip entire page instantly — still burning through recent tickets
+        var newest = (data[0].created_datetime||"").slice(0,10);
+        console.log("[Replace][2] Page "+pagesFetched+" — all too new (newest: "+newest+"), skipping instantly");
+        var nextCursor = (page.meta||{}).next_cursor||page.next_cursor;
+        if(!nextCursor) break;
+        cursor = nextCursor;
+        // No delay — burn fast
+        continue;
+      }
+
+      // We've reached the target window or gone past it
+      inWindow = true;
+      console.log("[Replace][2] Page "+pagesFetched+" — entered target window");
 
       for(var i=0; i<data.length; i++) {
         var t = data[i];
         var created = (t.created_datetime||"").slice(0,19);
 
-        // Past the week — stop
-        if(created && created < week.start) { reachedCutoff = true; break; }
-        // Before the week — skip (too new, Gorgias is newest-first)
-        if(created && created > week.end) continue;
+        if(created > week.end) continue; // skip tickets newer than window on this mixed page
+        if(created && created < week.start) { reachedCutoff = true; break; } // past the window
 
         // Must be same agent
         var au = t.assignee_user;
@@ -1566,22 +1616,20 @@ function App() {
           continue;
         }
 
-        // Must not already be audited/deleted
         if(usedIds.has(String(t.id))) {
           console.log("[Replace][2] Skip #"+t.id+" — already audited or deleted");
           continue;
         }
 
         // Fetch message count
-        console.log("[Replace][2] Checking msg count for #"+t.id+"...");
+        console.log("[Replace][2] Checking msgs for #"+t.id+"...");
         try {
           var msgResp = await gorgiasAPI("/tickets/"+t.id+"/messages", {limit:100});
           var msgs = msgResp.data||[];
           var msgCount = msgs.length;
-          console.log("[Replace][2] Ticket #"+t.id+" — msgs:", msgCount, "min required:", minMsg);
-          if(msgCount < minMsg) { console.log("[Replace][2] Skip — below min msg count"); continue; }
+          console.log("[Replace][2] #"+t.id+" — "+msgCount+" msgs (min: "+minMsg+")");
+          if(msgCount < minMsg) { console.log("[Replace][2] Skip — below min"); continue; }
 
-          // Build transcript while we have the messages
           var transcript = buildTranscript(msgs);
           var crParts = parseTicketField(t, 9969);
 
@@ -1596,25 +1644,25 @@ function App() {
             transcript: transcript,
             ticketUrl: "https://"+((window.__ENV__&&window.__ENV__.GORGIAS_DOMAIN)||"freedomgrooming.gorgias.com")+"/app/ticket/"+t.id,
           });
-          console.log("[Replace][2] ✓ Candidate found: #"+t.id+" ("+msgCount+" msgs, CR: "+crParts[0]+")");
+          console.log("[Replace][2] ✓ Candidate: #"+t.id+" ("+msgCount+" msgs)");
         } catch(e) {
-          console.log("[Replace][2] Skip #"+t.id+" — msg fetch failed:", e.message);
+          console.log("[Replace][2] Skip #"+t.id+" — msg fetch error:", e.message);
         }
         await new Promise(function(r){setTimeout(r,500);});
       }
 
-      var nextCursor = (page.meta||{}).next_cursor||page.next_cursor;
-      if(!nextCursor||reachedCutoff) break;
-      cursor = nextCursor;
-      await new Promise(function(r){setTimeout(r,100);});
+      var nextCursor2 = (page.meta||{}).next_cursor||page.next_cursor;
+      if(!nextCursor2||reachedCutoff) break;
+      cursor = nextCursor2;
+      // Inside window — use normal pacing to avoid rate limits
+      if(inWindow) await new Promise(function(r){setTimeout(r,100);});
     }
 
-    console.log("[Replace][2] Search complete. Candidates found:", candidates.length);
+    console.log("[Replace][2] Search complete. Pages fetched:", pagesFetched, "Candidates:", candidates.length);
     if(!candidates.length) return null;
 
-    // Pick randomly
     var picked = candidates[Math.floor(Math.random()*candidates.length)];
-    console.log("[Replace][2] Randomly selected:", picked.id);
+    console.log("[Replace][2] Selected:", picked.id);
     return picked;
   }
 
@@ -3135,7 +3183,7 @@ Rules:
       var reachedCutoff = false;
 
       var fc = {
-        raw:0, skippedStatus:0, skippedRecentlyClosed:0,
+        scanned:0, raw:0, skippedStatus:0, skippedRecentlyClosed:0,
         skippedChannel:0, skippedAgentFilter:0,
         skippedCR:0, skippedRes:0, skippedMsgCount:0, skippedKeyword:0,
         skippedAgentCap:0, skippedDeleted:0, result:0
@@ -3148,7 +3196,12 @@ Rules:
       console.log("[QA][fetch] Date filter (client-side) \u2014 start:", since, "end:", until||"none");
       console.log("[QA][filter] Status:", filterByStatus ? activeStatuses.join(", ") : "all");
 
-      setFetchStatus("Searched 0 \u00b7 Matched 0");
+      var results = [];
+      var perAgent = parseInt(f.ticketsPerAgent||"") || null;
+      var agentCounts = {};
+      if(perAgent) console.log("[QA][filter] Tickets per agent cap:", perAgent);
+
+      setFetchStatus("Scanning for tickets in your date range...");
 
       while(!reachedCutoff) {
         if(fetchCancelRef.current) { setFetchStatus("Cancelled \u2014 "+results.length+" matched."); break; }
@@ -3158,13 +3211,32 @@ Rules:
         var data = page.data || [];
         if(!data.length) break;
 
+        // Skip-fast: if all tickets on this page are newer than our window, no delay needed
+        if(until) {
+          var allTooNew = data.every(function(t){
+            return (t.created_datetime||"").slice(0,19) > until;
+          });
+          if(allTooNew) {
+            fc.scanned += data.length;
+            setFetchStatus("Scanning — skipped "+fc.scanned+" recent tickets, reaching your date range...");
+            var nc = (page.meta||{}).next_cursor||page.next_cursor;
+            if(!nc) break;
+            cursor = nc;
+            continue; // no delay
+          }
+        }
+
         for(var ti=0; ti<data.length; ti++) {
           if(fetchCancelRef.current) break;
           var t = data[ti];
           var tid = t.id;
           var created = (t.created_datetime||"").slice(0,19);
 
-          if(until && created && created > until) continue;
+          fc.scanned++;
+          if(until && created && created > until) {
+            setFetchStatus("Scanning \u2014 skipping "+fc.scanned+" recent tickets to reach your date range...");
+            continue;
+          }
           if(since && created && created < since) { reachedCutoff = true; break; }
           fc.raw++;
 
@@ -4971,7 +5043,8 @@ Rules:
                 <div style={{fontSize:"11px",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.07em",color:"var(--color-text-secondary)",marginBottom:"8px"}}>Filter summary</div>
                 <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(160px,1fr))",gap:"6px"}}>
                   {[
-                    {label:"From Gorgias",val:fetchSummary.raw,color:"var(--color-text-primary)"},
+                    {label:"Scanned from Gorgias",val:fetchSummary.scanned,color:"var(--color-text-secondary)"},
+                    {label:"In date range",val:fetchSummary.raw,color:"var(--color-text-primary)"},
                     {label:"Skipped — status",val:fetchSummary.skippedStatus,color:fetchSummary.skippedStatus>0?"var(--color-text-warning)":null},
                     {label:"Skipped — too recent",val:fetchSummary.skippedRecentlyClosed,color:fetchSummary.skippedRecentlyClosed>0?"var(--color-text-warning)":null},
                     {label:"Skipped — channel",val:fetchSummary.skippedChannel,color:fetchSummary.skippedChannel>0?"var(--color-text-warning)":null},
@@ -6248,9 +6321,10 @@ Rules:
               <div style={{textAlign:"center",padding:"16px 0"}}>
                 <div style={{width:"28px",height:"28px",border:"3px solid var(--color-border-info)",borderTop:"3px solid var(--color-text-info)",borderRadius:"50%",animation:"spin 0.8s linear infinite",margin:"0 auto 16px"}}/>
                 <p style={{fontSize:"14px",fontWeight:500,color:"var(--color-text-primary)",margin:"0 0 6px"}}>Searching Gorgias...</p>
-                <p style={{fontSize:"12px",color:"var(--color-text-secondary)",margin:0}}>
-                  Looking for {deleteModal.ticket.agentName} tickets this week with ≥{deleteModal.minMsg} messages
+                <p style={{fontSize:"12px",color:"var(--color-text-secondary)",margin:"0 0 4px"}}>
+                  {deleteModal._status||("Looking for "+deleteModal.ticket.agentName+" tickets the week of "+getWeekBounds(deleteModal.ticket.createdDate||new Date().toISOString()).start.slice(0,10))}
                 </p>
+                <p style={{fontSize:"11px",color:"var(--color-text-secondary)",margin:0,fontStyle:"italic"}}>Skipping recent pages to reach your date range — this may take a moment</p>
               </div>
             </>)}
 
