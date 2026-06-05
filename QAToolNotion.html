@@ -2,10 +2,28 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.49
-  Date:     2026-06-05
+  Version:  2.0.51
+  Date:     2026-06-06
 
   Changelog:
+  v2.0.51 (2026-06-06)
+    - Add Re-audit feature — Edit+ only, Review tab when ticket is open
+    - Fetches latest transcript from Gorgias, scores with Haiku, archives old record, saves new
+    - Pre-check: blocks if messageCount not on record (old tickets pre-v2.0.51)
+    - Blocks if no new messages since last audit (same count)
+    - Archive + save only after scoring succeeds — original untouched on failure
+    - Reaudit History JSON field tracks previous versions (score, passed, messages, date, auditor)
+    - Audit history collapsible shown in Review tab ticket header
+    - saveTicketToNotion now saves Message Count and Reaudit History to Notion
+    - parseNotionRow now reads messageCount and reauditHistory fields
+
+  v2.0.50 (2026-06-05)
+    - Add "Export .doc" button to Team Insights — exports full insights as Word document
+    - Includes status banner, stats, recommended focus, strengths, gaps, quick wins,
+      agent callouts, and contact reason breakdown with pass rate coloring
+    - Button only appears after insights are generated
+    - Uses same HTML-to-Word pattern as agent reports
+
   v2.0.49 (2026-06-05)
     - Fix: Replace search stops immediately after first eligible candidate is found
     - Previously built full candidate pool before picking — caused continued searching after match
@@ -530,7 +548,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.49";
+const APP_VERSION = "v2.0.51";
 const REPORTS_DB_ID = "3684e96c994180db8929c67f306c554a";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
@@ -819,6 +837,8 @@ async function saveTicketToNotion(dbId, ticket) {
     "Autofails JSON":     { rich_text: rt(JSON.stringify(ticket.autofails||[]).slice(0,1900)) },
     "Saved At":           { rich_text: rt(new Date().toISOString()) },
     "Audit Type":         { rich_text: rt(ticket.auditType||"AI Batch") },
+    "Message Count":      { number: ticket.messageCount||ticket.message_count||0 },
+    "Reaudit History":    { rich_text: rt(JSON.stringify(ticket.reauditHistory||[]).slice(0,1990)) },
   };
   if (ticket.ticketUrl) props["Ticket URL"] = { url: ticket.ticketUrl };
   const data = await notionAPI("/v1/pages", "POST", { parent: { database_id: dbId }, properties: props });
@@ -932,6 +952,10 @@ function parseNotionRow(r) {
     notesHistoryJSON: r.notesHistoryJSON || r["Notes History JSON"] || "{}",
     reopenHistoryJSON: r.reopenHistoryJSON || r["Reopen History JSON"] || "[]",
     auditType: r.auditType || r["Audit Type"] || "AI Batch",
+    messageCount: parseInt(r.messageCount ?? r["Message Count"] ?? "") || null,
+    reauditHistory: (function(){
+      try { return JSON.parse(r.reauditHistory || r["Reaudit History"] || "[]"); } catch(e){ return []; }
+    })(),
     deleted: r.deleted || false,
     deletedBy: r.deletedBy || "", deletedAt: r.deletedAt || "", deleteReason: r.deleteReason || ""
   };
@@ -1334,7 +1358,9 @@ function App() {
 
   // Delete & Replace modal state
   const [deleteModal,setDeleteModal]=useState(null);
-  // deleteModal shape:
+  const [reauditModal,setReauditModal]=useState(null);
+  // reauditModal shape:
+  // { step: "confirm"|"fetching"|"noNewMsgs"|"scoring"|"error", ticket, newMsgCount, error }
   // {
   //   step: "intent" | "minMsg" | "searching" | "found" | "notFound" | "scoring" | "error"
   //   ticket: <the ticket being deleted>
@@ -1738,7 +1764,144 @@ function App() {
     return newResult;
   }
 
-  function handleDeleteClick(ticket) {
+  function handleReauditClick(ticket) {
+    console.log("[Reaudit][0] Re-audit clicked for ticket #"+ticket.ticketId);
+    // Pre-check: messageCount must be recorded
+    if(!ticket.messageCount) {
+      console.log("[Reaudit][0] Blocked — no messageCount on record");
+      setReauditModal({step:"noMsgCount", ticket});
+      return;
+    }
+    setReauditModal({step:"confirm", ticket, newMsgCount:null, error:""});
+  }
+
+  async function proceedReaudit() {
+    var rm = reauditModal;
+    if(!rm) return;
+
+    if(rm.step==="confirm") {
+      // Step 1 — fetch messages from Gorgias
+      console.log("[Reaudit][1] Fetching messages for ticket #"+rm.ticket.ticketId+"...");
+      setReauditModal(function(r){return Object.assign({},r,{step:"fetching"});});
+      try {
+        var msgResp = await gorgiasAPI("/tickets/"+rm.ticket.ticketId+"/messages", {limit:100});
+        var msgs = msgResp.data||[];
+        var newCount = msgs.length;
+        console.log("[Reaudit][1] Current msgs:", newCount, "| Original:", rm.ticket.messageCount);
+        if(newCount <= rm.ticket.messageCount) {
+          console.log("[Reaudit][1] No new messages — blocking re-audit");
+          setReauditModal(function(r){return Object.assign({},r,{step:"noNewMsgs", newMsgCount:newCount});});
+          return;
+        }
+        // New messages found — proceed to scoring
+        console.log("[Reaudit][2] New messages found ("+newCount+" vs "+rm.ticket.messageCount+") — scoring...");
+        setReauditModal(function(r){return Object.assign({},r,{step:"scoring", newMsgCount:newCount});});
+
+        // Step 2 — build transcript and score
+        var transcript = buildTranscript(msgs);
+        var ticketObj = {
+          ticketId:      rm.ticket.ticketId,
+          ticketUrl:     rm.ticket.ticketUrl,
+          agentName:     rm.ticket.agentName,
+          transcript:    transcript,
+          subject:       rm.ticket.subject,
+          contactReason: rm.ticket.contactReason,
+          createdDate:   rm.ticket.createdDate,
+          customerEmail: rm.ticket.customerEmail||"",
+          reviewer:      rm.ticket.reviewer,
+        };
+        var rawTxt = await callClaudeWithRetry(buildEvalPrompt(ticketObj));
+        console.log("[Reaudit][2] Claude response received");
+        var cleanTxt = rawTxt.replace(/```(?:json)?\s*/g,"").replace(/```/g,"").trim();
+        var jsonMatch = cleanTxt.match(/\{[\s\S]+\}/);
+        if(!jsonMatch) throw new Error("No JSON in Claude response");
+        var parsed = JSON.parse(jsonMatch[0]);
+        var sc = calcScore(parsed.scores||{}, matrix);
+        var hasAF = (parsed.autofails||[]).length > 0;
+        var week = ticketWeekLabel(rm.ticket.createdDate)||ticketWeekLabel(new Date().toISOString().slice(0,10));
+
+        // Build reaudit history — carry forward existing + add current record
+        var prevHistory = rm.ticket.reauditHistory||[];
+        var newHistory = prevHistory.concat([{
+          version: prevHistory.length+1,
+          score:   rm.ticket.finalScore,
+          passed:  !!(rm.ticket.disputedPassed!==undefined?rm.ticket.disputedPassed:rm.ticket.passed),
+          messages: rm.ticket.messageCount,
+          auditedAt: rm.ticket.savedAt ? rm.ticket.savedAt.slice(0,10) : "",
+          auditor:   rm.ticket.reviewer,
+        }]);
+
+        var newRecord = {
+          ticketId:      rm.ticket.ticketId,
+          ticketUrl:     rm.ticket.ticketUrl,
+          agentName:     rm.ticket.agentName,
+          reviewer:      rm.ticket.reviewer,
+          week:          week,
+          createdDate:   rm.ticket.createdDate,
+          contactReason: parsed.meta&&parsed.meta.contactReason||rm.ticket.contactReason,
+          subject:       rm.ticket.subject,
+          scores:        parsed.scores||{},
+          aiScores:      parsed.scores||{},
+          autofails:     parsed.autofails||[],
+          autofail:      hasAF,
+          comments:      parsed.comments||"",
+          totalPoints:   sc?sc.pts:0,
+          maxPoints:     sc?sc.max:0,
+          finalScore:    sc?sc.pct:0,
+          aiScore:       sc?sc.pct:0,
+          passed:        !hasAF&&(sc?sc.pct:0)>=85,
+          hasDisputes:   false,
+          disputes:      {},
+          justifications:parsed.justifications||{},
+          customerEmail: rm.ticket.customerEmail||"",
+          savedAt:       new Date().toISOString(),
+          transcript:    transcript,
+          messageCount:  newCount,
+          reauditHistory:newHistory,
+          auditType:     "Re-audit",
+        };
+        console.log("[Reaudit][3] Scoring complete. Score:", newRecord.finalScore, "Passed:", newRecord.passed);
+
+        // Step 3 — archive old record (only after scoring succeeds)
+        console.log("[Reaudit][4] Archiving original record (pageId:", rm.ticket.notionPageId+")...");
+        if(rm.ticket.notionPageId) {
+          await notionAPI("/v1/pages/"+rm.ticket.notionPageId,"PATCH",{properties:{
+            "Deleted":       {checkbox:true},
+            "Deleted By":    {rich_text:[{text:{content:currentUser.name}}]},
+            "Deleted At":    {rich_text:[{text:{content:new Date().toISOString()}}]},
+            "Delete Reason": {rich_text:[{text:{content:"Re-audited on "+new Date().toISOString().slice(0,10)+" — "+newCount+" messages"}}]},
+          }});
+        }
+        console.log("[Reaudit][4] Archived. Saving new record...");
+
+        // Step 4 — save new record
+        var saved = await saveTicketToNotion(TICKETS_DB_ID, newRecord);
+        newRecord.notionPageId = saved.id;
+        newRecord.id = saved.id;
+        console.log("[Reaudit][5] Saved. New page ID:", saved.id);
+
+        // Update local state
+        setTickets(function(ts){
+          return ts.filter(function(t){return t.notionPageId!==rm.ticket.notionPageId;})
+                   .concat([parseNotionRow(Object.assign({pageId:saved.id},newRecord))]);
+        });
+        setDeletedTicketIds(function(prev){
+          var next=new Set(prev);
+          if(rm.ticket.ticketId) next.delete(String(rm.ticket.ticketId));
+          return next;
+        });
+
+        setReauditModal(null);
+        setReviewSelected(null);
+        addToast("Ticket #"+rm.ticket.ticketId+" re-audited — "+newRecord.finalScore+"% ("+(newRecord.passed?"Pass":"Fail")+")");
+        console.log("[Reaudit][6] Done.");
+      } catch(e) {
+        console.log("[Reaudit] Failed:", e.message, "— original record untouched");
+        setReauditModal(function(r){return Object.assign({},r,{step:"error",error:e.message});});
+      }
+      return;
+    }
+  }
     // Step 0 — show intent modal
     console.log("[Replace][0] Delete clicked for ticket #"+ticket.ticketId);
     setDeleteModal({ step:"intent", ticket, minMsg:4, replacement:null, error:"" });
@@ -2431,7 +2594,107 @@ function App() {
     setSyncStatus("");
   }
 
-  // ── MY REPORTS ───────────────────────────────────────────────────────────────
+  function downloadInsightsDoc() {
+    if(!aiInsights) { addToast("No insights to export","error"); return; }
+    var ins = aiInsights;
+    var sc = statusColors[ins.status]||statusColors.on_track;
+    var filtered2 = tickets.filter(function(t){return t.finalScore>0;});
+    var teamAvg = filtered2.length ? Math.round(filtered2.reduce(function(s,t){return s+t.finalScore;},0)/filtered2.length) : 0;
+    var passRate2 = filtered2.length ? Math.round(filtered2.filter(function(t){return t.passed;}).length/filtered2.length*100) : 0;
+    var autofails2 = filtered2.filter(function(t){return t.autofail;}).length;
+    var dateStr = new Date().toLocaleDateString("en-US",{month:"long",day:"numeric",year:"numeric"});
+
+    var STATUS_COLOR = {"critical":"#C62828","needs_attention":"#E65100","on_track":"#1B5E20","strong":"#1B5E20"}[ins.status]||"#1565C0";
+
+    function rows(arr, colorFn) {
+      return (arr||[]).map(function(item){
+        var c = colorFn ? colorFn(item) : "#333333";
+        return "<tr><td style='padding:8px 12px;border-bottom:1px solid #e5e7eb;color:"+c+";font-weight:600;width:35%'>"+item.title+"</td>"
+              +"<td style='padding:8px 12px;border-bottom:1px solid #e5e7eb;color:#444;font-size:12px'>"+item.detail+"</td></tr>";
+      }).join("");
+    }
+
+    var html = "<!DOCTYPE html><html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'><head><meta charset='utf-8'>"
+      +"<style>body{font-family:Arial,sans-serif;font-size:13px;color:#1a1a2e;margin:0;padding:32px}"
+      +"h1{font-size:22px;font-weight:700;color:#0D1B3E;margin:0 0 4px}"
+      +"h2{font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:0.07em;color:#6b7280;margin:24px 0 10px;border-bottom:1px solid #e5e7eb;padding-bottom:4px}"
+      +"table{width:100%;border-collapse:collapse}td{vertical-align:top}"
+      +".stat{background:#f4f6f8;border-radius:6px;padding:12px 16px;text-align:center;display:inline-block;min-width:80px;margin-right:8px}"
+      +".stat-val{font-size:24px;font-weight:700;color:"+STATUS_COLOR+"}"
+      +".stat-lbl{font-size:10px;text-transform:uppercase;letter-spacing:0.06em;color:#6b7280;margin-top:2px}"
+      +".banner{border-left:4px solid "+STATUS_COLOR+";padding:16px 20px;background:#f4f6f8;border-radius:6px;margin-bottom:20px}"
+      +".headline{font-size:16px;font-weight:700;color:"+STATUS_COLOR+";margin:0 0 6px}"
+      +".summary{font-size:13px;color:#333;line-height:1.7;margin:0}"
+      +".focus{border-left:3px solid #1565C0;padding:10px 16px;background:#e8f0fb;border-radius:4px;font-size:13px;color:#1a1a2e;line-height:1.7}"
+      +"</style></head><body>"
+      +"<h1>Wingman — Team Insights</h1>"
+      +"<p style='margin:2px 0 20px;color:#6b7280;font-size:12px'>Generated "+dateStr+" &nbsp;·&nbsp; by Freebird CX</p>"
+
+      // Status banner
+      +"<div class='banner'>"
+      +"<div class='headline'>"+ins.headline+"</div>"
+      +"<div class='summary'>"+ins.summary+"</div>"
+      +"</div>"
+
+      // Stats
+      +"<div style='margin-bottom:20px'>"
+      +"<div class='stat'><div class='stat-val'>"+passRate2+"%</div><div class='stat-lbl'>Pass Rate</div></div>"
+      +"<div class='stat'><div class='stat-val'>"+teamAvg+"%</div><div class='stat-lbl'>Avg Score</div></div>"
+      +"<div class='stat'><div class='stat-val'>"+filtered2.length+"</div><div class='stat-lbl'>Tickets</div></div>"
+      +"<div class='stat'><div class='stat-val'>"+autofails2+"</div><div class='stat-lbl'>Autofails</div></div>"
+      +"</div>"
+
+      // Recommended focus
+      +"<h2>Recommended Focus</h2>"
+      +"<div class='focus'>"+ins.recommendedFocus+"</div>"
+
+      // Strengths
+      +"<h2>What the Team Does Well</h2>"
+      +"<table>"+rows(ins.strengths, function(){return "#00865e;"})+"</table>"
+
+      // Gaps
+      +"<h2>Gaps &amp; Risks</h2>"
+      +"<table>"+rows(ins.gaps, function(){return "#C62828;"})+"</table>"
+
+      // Quick wins
+      +"<h2>Lowest Hanging Fruit</h2>"
+      +"<table><tr style='background:#f4f6f8'><th style='padding:8px 12px;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:0.06em;color:#6b7280'>Action</th><th style='padding:8px 12px;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:0.06em;color:#6b7280'>Why</th><th style='padding:8px 12px;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:0.06em;color:#6b7280'>Effort</th></tr>"
+      +(ins.quickWins||[]).map(function(w){
+        return "<tr><td style='padding:8px 12px;border-bottom:1px solid #e5e7eb;font-weight:600;color:#1a1a2e'>"+w.action+"</td>"
+              +"<td style='padding:8px 12px;border-bottom:1px solid #e5e7eb;color:#444;font-size:12px'>"+w.why+"</td>"
+              +"<td style='padding:8px 12px;border-bottom:1px solid #e5e7eb;font-size:11px;color:#00865e;font-weight:700'>"+(w.effort||"Low")+"</td></tr>";
+      }).join("")+"</table>"
+
+      // Agent callouts
+      +"<h2>Agent Callouts</h2>"
+      +"<table>"
+      +(ins.agentCallouts||[]).map(function(a){
+        var isTop = a.type==="top";
+        return "<tr><td style='padding:8px 12px;border-bottom:1px solid #e5e7eb;width:20%'>"
+              +"<span style='font-size:10px;font-weight:700;padding:2px 8px;border-radius:999px;background:"+(isTop?"#e6f7f3":"#fef2f2")+";color:"+(isTop?"#00865e":"#C62828")+";border:1px solid "+(isTop?"#00C49A":"#fecaca")+"'>"+(isTop?"Top":"Watch")+"</span></td>"
+              +"<td style='padding:8px 12px;border-bottom:1px solid #e5e7eb;font-weight:600;color:#1a1a2e;width:25%'>"+a.name+"</td>"
+              +"<td style='padding:8px 12px;border-bottom:1px solid #e5e7eb;color:#444;font-size:12px'>"+a.note+"</td></tr>";
+      }).join("")+"</table>"
+
+      // Contact reason insight
+      +"<h2>Contact Reason Insight</h2>"
+      +"<p style='font-size:13px;color:#444;line-height:1.7;margin:0 0 12px'>"+ins.contactReasonInsight+"</p>"
+      +(ins.contactReasonBreakdown&&ins.contactReasonBreakdown.length
+        ?"<table><tr style='background:#f4f6f8'><th style='padding:6px 12px;text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:0.06em;color:#6b7280'>Contact Reason</th><th style='padding:6px 12px;text-align:right;font-size:11px;text-transform:uppercase;letter-spacing:0.06em;color:#6b7280'>Tickets</th><th style='padding:6px 12px;text-align:right;font-size:11px;text-transform:uppercase;letter-spacing:0.06em;color:#6b7280'>Pass Rate</th></tr>"
+        +(ins.contactReasonBreakdown||[]).map(function(cr){
+          var c=cr.passRate>=85?"#00865e":cr.passRate>=70?"#E65100":"#C62828";
+          return "<tr><td style='padding:6px 12px;border-bottom:1px solid #e5e7eb;color:#1a1a2e'>"+cr.reason+"</td>"
+                +"<td style='padding:6px 12px;border-bottom:1px solid #e5e7eb;text-align:right;color:#6b7280'>"+cr.tickets+"</td>"
+                +"<td style='padding:6px 12px;border-bottom:1px solid #e5e7eb;text-align:right;font-weight:700;color:"+c+"'>"+cr.passRate+"%</td></tr>";
+        }).join("")+"</table>":"")
+
+      +"<p style='margin-top:32px;font-size:11px;color:#9ca3af;border-top:1px solid #e5e7eb;padding-top:12px'>Wingman by Freebird CX &nbsp;·&nbsp; Team Insights &nbsp;·&nbsp; "+dateStr+"</p>"
+      +"</body></html>";
+
+    var dateTag = new Date().toISOString().slice(0,10);
+    downloadBlob(html, "Wingman_TeamInsights_"+dateTag+".doc", "application/msword");
+    addToast("Team insights exported");
+  }
   function chunkReportContent(html) {
     // Split HTML into chunks of 1990 chars max, up to 20 chunks = 39800 chars total
     var chunks = [];
@@ -4378,6 +4641,7 @@ Rules:
                       <button onClick={function(){setRemoveAutofailPrompt(true);}} style={{...ghost,fontSize:"12px",color:"var(--color-text-warning)",borderColor:"var(--color-border-warning)"}}>✕ Remove autofail</button>
                     )
                   )}
+                  {isEditor&&<button onClick={function(){handleReauditClick(reviewSelected);}} style={{...ghost,fontSize:"12px",color:"var(--color-text-info)",borderColor:"var(--color-border-info)"}}>↺ Re-audit</button>}
                   {isEditor&&<button onClick={function(){handleDeleteClick(reviewSelected);}} style={{...ghost,fontSize:"12px",color:"var(--color-text-danger)",borderColor:"var(--color-border-danger)"}}>🗑 Delete audit</button>}
                 </div>
               </div>
@@ -4409,6 +4673,29 @@ Rules:
                     )}
                   </div>
                 </div>
+
+                {/* Audit history — shown when reauditHistory has entries */}
+                {reviewSelected.reauditHistory&&reviewSelected.reauditHistory.length>0&&(
+                  <div style={{marginBottom:"12px",border:"0.5px solid var(--color-border-info)",borderRadius:"var(--border-radius-md)",overflow:"hidden"}}>
+                    <details>
+                      <summary style={{padding:"8px 12px",cursor:"pointer",fontSize:"12px",fontWeight:600,color:"var(--color-text-info)",background:"var(--color-background-info)",listStyle:"none",display:"flex",alignItems:"center",gap:"6px",userSelect:"none"}}>
+                        <span>↺</span> Audit history ({reviewSelected.reauditHistory.length} previous version{reviewSelected.reauditHistory.length!==1?"s":""})
+                      </summary>
+                      <div style={{padding:"8px 12px"}}>
+                        {reviewSelected.reauditHistory.map(function(h,i){
+                          return <div key={i} style={{display:"flex",gap:"16px",padding:"6px 0",borderBottom:i<reviewSelected.reauditHistory.length-1?"0.5px solid var(--color-border-tertiary)":"none",fontSize:"12px",alignItems:"center"}}>
+                            <span style={{fontWeight:700,color:"var(--color-text-secondary)",minWidth:"20px"}}>v{h.version}</span>
+                            <span style={{fontWeight:600,color:h.passed?"var(--color-text-success)":"var(--color-text-danger)"}}>{h.score}% {h.passed?"Pass":"Fail"}</span>
+                            <span style={{color:"var(--color-text-secondary)"}}>{h.messages} msgs</span>
+                            <span style={{color:"var(--color-text-secondary)"}}>{h.auditedAt}</span>
+                            <span style={{color:"var(--color-text-secondary)"}}>{h.auditor}</span>
+                          </div>;
+                        })}
+                      </div>
+                    </details>
+                  </div>
+                )}
+
                 {/* Autofail banner */}
                 {reviewSelected.autofail&&reviewSelected.autofails&&reviewSelected.autofails.length>0&&(
                   <div style={{padding:"10px 14px",background:"var(--color-background-danger)",borderRadius:"var(--border-radius-md)",border:"0.5px solid var(--color-border-danger)",marginBottom:"12px"}}>
@@ -5587,10 +5874,16 @@ Rules:
                     <p style={{margin:"0 0 2px",fontWeight:700,fontSize:"15px"}}>Team Insights</p>
                     <p style={{margin:0,fontSize:"12px",color:"var(--color-text-secondary)"}}>AI-generated analysis for leadership</p>
                   </div>
-                  <button onClick={function(){generateAIInsights(fromVal,toVal);}} disabled={aiInsightsLoading}
-                    style={{...btnInfo,opacity:aiInsightsLoading?0.6:1,minWidth:"140px"}}>
-                    {aiInsightsLoading?"Analyzing...":"✦ Generate insights"}
-                  </button>
+                  <div style={{display:"flex",gap:"8px",alignItems:"center"}}>
+                    {ins&&<button onClick={downloadInsightsDoc}
+                      style={{...ghost,fontSize:"12px",padding:"7px 14px"}}>
+                      ⬇ Export .doc
+                    </button>}
+                    <button onClick={function(){generateAIInsights(fromVal,toVal);}} disabled={aiInsightsLoading}
+                      style={{...btnInfo,opacity:aiInsightsLoading?0.6:1,minWidth:"140px"}}>
+                      {aiInsightsLoading?"Analyzing...":"✦ Generate insights"}
+                    </button>
+                  </div>
                 </div>
 
                 {aiInsightsError&&<div style={{padding:"12px",background:"#fee2e2",borderRadius:"var(--border-radius-md)",color:"#991b1b",fontSize:"13px",marginBottom:"12px"}}>{aiInsightsError}</div>}
@@ -6275,6 +6568,96 @@ Rules:
                 </div>
               )}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Re-audit Modal ── */}
+      {reauditModal&&(
+        <div style={{position:"fixed",inset:0,zIndex:2000,background:"rgba(0,0,0,0.5)",display:"flex",alignItems:"center",justifyContent:"center",padding:"24px"}}>
+          <div style={{background:"white",borderRadius:"16px",padding:"32px",width:"460px",maxWidth:"100%",boxShadow:"0 8px 32px rgba(0,0,0,0.18)"}}>
+
+            {/* No message count on record */}
+            {reauditModal.step==="noMsgCount"&&(<>
+              <div style={{textAlign:"center",padding:"8px 0 16px"}}>
+                <div style={{fontSize:"36px",marginBottom:"12px"}}>📋</div>
+                <h3 style={{fontSize:"16px",fontWeight:600,margin:"0 0 10px",color:"var(--color-text-primary)"}}>Re-audit not available</h3>
+                <p style={{fontSize:"13px",color:"var(--color-text-secondary)",lineHeight:"1.6",margin:"0 0 20px"}}>
+                  Message count was not recorded for ticket <span style={{fontFamily:"var(--font-mono)",fontWeight:600}}>#{reauditModal.ticket.ticketId}</span> at the time of the original audit. Re-audit is only available for tickets audited after this feature was added.
+                </p>
+                <button onClick={function(){setReauditModal(null);}} style={{...ghost,padding:"10px 24px",fontSize:"13px"}}>Close</button>
+              </div>
+            </>)}
+
+            {/* Confirm */}
+            {reauditModal.step==="confirm"&&(<>
+              <h3 style={{fontSize:"16px",fontWeight:600,margin:"0 0 6px",color:"var(--color-text-primary)"}}>Re-audit ticket?</h3>
+              <p style={{fontSize:"12px",color:"var(--color-text-secondary)",margin:"0 0 18px"}}>
+                The latest transcript will be fetched from Gorgias and scored fresh. Existing disputes will not carry over.
+              </p>
+              <div style={{background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)",padding:"14px 16px",marginBottom:"20px",border:"0.5px solid var(--color-border-tertiary)"}}>
+                <div style={{display:"flex",justifyContent:"space-between",marginBottom:"4px"}}>
+                  <span style={{fontFamily:"var(--font-mono)",fontWeight:700,color:"var(--color-text-info)",fontSize:"13px"}}>#{reauditModal.ticket.ticketId}</span>
+                  <span style={{fontSize:"11px",color:"var(--color-text-secondary)"}}>{reauditModal.ticket.messageCount} messages on record</span>
+                </div>
+                <div style={{fontSize:"12px",color:"var(--color-text-primary)",fontWeight:500,marginBottom:"4px"}}>{reauditModal.ticket.agentName}</div>
+                <div style={{fontSize:"11px",color:"var(--color-text-secondary)"}}>
+                  Score: {reauditModal.ticket.finalScore}% ({(reauditModal.ticket.disputedPassed!==undefined?reauditModal.ticket.disputedPassed:reauditModal.ticket.passed)?"Pass":"Fail"})
+                  {reauditModal.ticket.reviewer&&<span> · Auditor: {reauditModal.ticket.reviewer}</span>}
+                  {reauditModal.ticket.savedAt&&<span> · Audited: {reauditModal.ticket.savedAt.slice(0,10)}</span>}
+                </div>
+              </div>
+              <div style={{display:"flex",gap:"10px"}}>
+                <button onClick={proceedReaudit} style={{...btnInfo,padding:"10px 24px",fontSize:"13px",flex:1}}>Re-audit</button>
+                <button onClick={function(){setReauditModal(null);}} style={{...ghost,padding:"10px 24px",fontSize:"13px"}}>Cancel</button>
+              </div>
+            </>)}
+
+            {/* Fetching */}
+            {reauditModal.step==="fetching"&&(<>
+              <div style={{textAlign:"center",padding:"16px 0"}}>
+                <div style={{width:"28px",height:"28px",border:"3px solid var(--color-border-info)",borderTop:"3px solid var(--color-text-info)",borderRadius:"50%",animation:"spin 0.8s linear infinite",margin:"0 auto 16px"}}/>
+                <p style={{fontSize:"14px",fontWeight:500,color:"var(--color-text-primary)",margin:"0 0 6px"}}>Fetching latest transcript...</p>
+                <p style={{fontSize:"12px",color:"var(--color-text-secondary)",margin:0}}>Checking Gorgias for new messages on ticket #{reauditModal.ticket.ticketId}</p>
+              </div>
+            </>)}
+
+            {/* No new messages */}
+            {reauditModal.step==="noNewMsgs"&&(<>
+              <div style={{textAlign:"center",padding:"8px 0 16px"}}>
+                <div style={{fontSize:"36px",marginBottom:"12px"}}>💬</div>
+                <h3 style={{fontSize:"16px",fontWeight:600,margin:"0 0 10px",color:"var(--color-text-primary)"}}>No new messages</h3>
+                <p style={{fontSize:"13px",color:"var(--color-text-secondary)",lineHeight:"1.6",margin:"0 0 8px"}}>
+                  Ticket <span style={{fontFamily:"var(--font-mono)",fontWeight:600}}>#{reauditModal.ticket.ticketId}</span> still has <strong>{reauditModal.newMsgCount}</strong> messages — same as the last audit.
+                </p>
+                <p style={{fontSize:"12px",fontWeight:600,color:"var(--color-text-warning)",margin:"0 0 20px"}}>Re-audit is only available when new messages exist.</p>
+                <button onClick={function(){setReauditModal(null);}} style={{...ghost,padding:"10px 24px",fontSize:"13px"}}>Close</button>
+              </div>
+            </>)}
+
+            {/* Scoring */}
+            {reauditModal.step==="scoring"&&(<>
+              <div style={{textAlign:"center",padding:"16px 0"}}>
+                <div style={{width:"28px",height:"28px",border:"3px solid var(--color-border-success)",borderTop:"3px solid var(--color-text-success)",borderRadius:"50%",animation:"spin 0.8s linear infinite",margin:"0 auto 16px"}}/>
+                <p style={{fontSize:"14px",fontWeight:500,color:"var(--color-text-primary)",margin:"0 0 6px"}}>Scoring updated transcript...</p>
+                <p style={{fontSize:"12px",color:"var(--color-text-secondary)",margin:"0 0 4px"}}>
+                  Found {reauditModal.newMsgCount} messages ({reauditModal.newMsgCount - (reauditModal.ticket.messageCount||0)} new)
+                </p>
+                <p style={{fontSize:"11px",color:"var(--color-text-secondary)",margin:0,fontStyle:"italic"}}>Original audit has not been changed yet.</p>
+              </div>
+            </>)}
+
+            {/* Error */}
+            {reauditModal.step==="error"&&(<>
+              <div style={{textAlign:"center",padding:"8px 0 16px"}}>
+                <div style={{fontSize:"36px",marginBottom:"12px"}}>⚠️</div>
+                <h3 style={{fontSize:"16px",fontWeight:600,margin:"0 0 8px",color:"var(--color-text-danger)"}}>Re-audit failed</h3>
+                <p style={{fontSize:"13px",color:"var(--color-text-secondary)",margin:"0 0 8px",lineHeight:"1.6"}}>{reauditModal.error}</p>
+                <p style={{fontSize:"12px",fontWeight:600,color:"var(--color-text-warning)",margin:"0 0 20px"}}>Original audit was not changed.</p>
+                <button onClick={function(){setReauditModal(null);}} style={{...ghost,padding:"10px 24px",fontSize:"13px"}}>Close</button>
+              </div>
+            </>)}
+
           </div>
         </div>
       )}
