@@ -2,10 +2,14 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.52
+  Version:  2.0.53
   Date:     2026-06-06
 
   Changelog:
+  v2.0.53 (2026-06-06)
+    - Fix: sectionLabel const/var conflict — same root cause as v2.0.52
+    - Full scan confirmed no further const/var conflicts remain
+
   v2.0.52 (2026-06-06)
     - Fix: SyntaxError "card has already been declared" — change module-level const to var
     - Affected: card, lbl, inp, ta, btnInfo, btnSuccess, ghost — all were const at module
@@ -553,7 +557,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.52";
+const APP_VERSION = "v2.0.53";
 const REPORTS_DB_ID = "3684e96c994180db8929c67f306c554a";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
@@ -1236,7 +1240,7 @@ var ta = (h) => ({ ...inp, height: h, resize: "vertical", fontFamily: "inherit",
 var btnInfo = { background: "var(--color-background-info)", color: "var(--color-text-info)", border: "0.5px solid var(--color-border-info)", borderRadius: "var(--border-radius-md)", padding: "6px 14px", cursor: "pointer", fontSize: "13px", fontWeight: 500 };
 var btnSuccess = { background: "var(--color-background-success)", color: "var(--color-text-success)", border: "0.5px solid var(--color-border-success)", borderRadius: "var(--border-radius-md)", padding: "6px 14px", cursor: "pointer", fontSize: "13px", fontWeight: 500 };
 var ghost = { background: "transparent", color: "var(--color-text-secondary)", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", padding: "6px 14px", cursor: "pointer", fontSize: "13px" };
-const sectionLabel = { fontSize: "11px", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--color-text-secondary)", margin: "0 0 8px" };
+var sectionLabel = { fontSize: "11px", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--color-text-secondary)", margin: "0 0 8px" };
 
 const NAV_TABS = [["fetch", "Fetch Tickets"], ["batch", "Batch QA"], ["manual", "Manual Audit"], ["dashboard", "Dashboard"], ["review", "Review"], ["myreports", "My Reports"], ["reports", "Reports"], ["matrix", "Matrix"], ["calibration", "Calibration"]];
 
