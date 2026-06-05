@@ -2,10 +2,15 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.51
+  Version:  2.0.52
   Date:     2026-06-06
 
   Changelog:
+  v2.0.52 (2026-06-06)
+    - Fix: SyntaxError "card has already been declared" — change module-level const to var
+    - Affected: card, lbl, inp, ta, btnInfo, btnSuccess, ghost — all were const at module
+      scope conflicting with var redeclarations inside App function
+
   v2.0.51 (2026-06-06)
     - Add Re-audit feature — Edit+ only, Review tab when ticket is open
     - Fetches latest transcript from Gorgias, scores with Haiku, archives old record, saves new
@@ -548,7 +553,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.51";
+const APP_VERSION = "v2.0.52";
 const REPORTS_DB_ID = "3684e96c994180db8929c67f306c554a";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
@@ -1224,13 +1229,13 @@ function ScorePill({ label }) {
   const tone = label === "Pass" ? T.green : label === "Partial" ? T.amber : label === "Miss" ? T.red : { text: "#6b7280", bg: "#f3f4f6", border: "#e5e7eb" };
   return <span style={{ fontSize: "11px", fontWeight: 700, padding: "2px 10px", borderRadius: "4px", background: tone.bg, color: tone.text, border: "1px solid " + tone.border, whiteSpace: "nowrap" }}>{label}</span>;
 }
-const card = { background: "var(--color-background-primary)", border: "0.5px solid var(--color-border-tertiary)", borderRadius: "var(--border-radius-lg)", padding: "1rem 1.25rem", marginBottom: "12px" };
-const lbl = { fontSize: "11px", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--color-text-secondary)", display: "block", marginBottom: "6px" };
-const inp = { width: "100%", boxSizing: "border-box", fontSize: "13px" };
-const ta = (h) => ({ ...inp, height: h, resize: "vertical", fontFamily: "inherit", fontSize: "12px", lineHeight: 1.5 });
-const btnInfo = { background: "var(--color-background-info)", color: "var(--color-text-info)", border: "0.5px solid var(--color-border-info)", borderRadius: "var(--border-radius-md)", padding: "6px 14px", cursor: "pointer", fontSize: "13px", fontWeight: 500 };
-const btnSuccess = { background: "var(--color-background-success)", color: "var(--color-text-success)", border: "0.5px solid var(--color-border-success)", borderRadius: "var(--border-radius-md)", padding: "6px 14px", cursor: "pointer", fontSize: "13px", fontWeight: 500 };
-const ghost = { background: "transparent", color: "var(--color-text-secondary)", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", padding: "6px 14px", cursor: "pointer", fontSize: "13px" };
+var card = { background: "var(--color-background-primary)", border: "0.5px solid var(--color-border-tertiary)", borderRadius: "var(--border-radius-lg)", padding: "1rem 1.25rem", marginBottom: "12px" };
+var lbl = { fontSize: "11px", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--color-text-secondary)", display: "block", marginBottom: "6px" };
+var inp = { width: "100%", boxSizing: "border-box", fontSize: "13px" };
+var ta = (h) => ({ ...inp, height: h, resize: "vertical", fontFamily: "inherit", fontSize: "12px", lineHeight: 1.5 });
+var btnInfo = { background: "var(--color-background-info)", color: "var(--color-text-info)", border: "0.5px solid var(--color-border-info)", borderRadius: "var(--border-radius-md)", padding: "6px 14px", cursor: "pointer", fontSize: "13px", fontWeight: 500 };
+var btnSuccess = { background: "var(--color-background-success)", color: "var(--color-text-success)", border: "0.5px solid var(--color-border-success)", borderRadius: "var(--border-radius-md)", padding: "6px 14px", cursor: "pointer", fontSize: "13px", fontWeight: 500 };
+var ghost = { background: "transparent", color: "var(--color-text-secondary)", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", padding: "6px 14px", cursor: "pointer", fontSize: "13px" };
 const sectionLabel = { fontSize: "11px", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--color-text-secondary)", margin: "0 0 8px" };
 
 const NAV_TABS = [["fetch", "Fetch Tickets"], ["batch", "Batch QA"], ["manual", "Manual Audit"], ["dashboard", "Dashboard"], ["review", "Review"], ["myreports", "My Reports"], ["reports", "Reports"], ["matrix", "Matrix"], ["calibration", "Calibration"]];
