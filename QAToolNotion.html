@@ -2,10 +2,18 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.56
+  Version:  2.0.57
   Date:     2026-06-09
 
   Changelog:
+  v2.0.57 (2026-06-09)
+    - Fix: calcDisputedScore now only uses approved disputes for score calculation
+    - Pending and rejected disputes no longer inflate reported scores
+    - CSV export finalScores column also fixed to only use approved disputes
+    - Report score display: approved disputes show crossed-out AI → final score
+    - Report score display: pending disputes show AI score + "Pending dispute" note
+    - Dashboard was already correct (reads Final Score / Final Passed from Notion)
+
   v2.0.56 (2026-06-09)
     - Fix: disputes JSON failing to parse when justification text contains apostrophes
     - The .replace(/'/g,'"') was converting apostrophes to double quotes, breaking JSON.parse
@@ -577,7 +585,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.56";
+const APP_VERSION = "v2.0.57";
 const REPORTS_DB_ID = "3684e96c994180db8929c67f306c554a";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
@@ -1086,10 +1094,12 @@ function calcScore(scores, matrix) {
   return max === 0 ? null : { pts, max, pct: Math.round((pts / max) * 100) };
 }
 function calcDisputedScore(ticket, matrix) {
+  // Only approved disputes affect the score — pending and rejected use AI score
   const merged = {};
   matrix.forEach(c => {
     const d = ticket.disputes && ticket.disputes[c.id];
-    merged[c.id] = d ? d.finalScore : ((ticket.aiScores && ticket.aiScores[c.id]) || "");
+    const useDispute = d && d.status === "approved";
+    merged[c.id] = useDispute ? d.finalScore : ((ticket.aiScores && ticket.aiScores[c.id]) || "");
   });
   return calcScore(merged, matrix);
 }
@@ -2369,10 +2379,15 @@ function App() {
       var rl=t.autofail?"Autofail":effectivePassed?"Pass":"Fail";
       var rb=t.autofail||rl==="Fail"?"#fee2e2":"#f0fdf4",rt=t.autofail||rl==="Fail"?"#991b1b":"#166534",rbd=t.autofail||rl==="Fail"?"#fecaca":"#bbf7d0";
 
-      // Score display: if disputed, show AI crossed out -> Final
+      var hasApprovedDisputes = t.disputes && Object.values(t.disputes).some(function(d){return d.status==="approved";});
+      var hasPendingDisputes  = t.disputes && Object.values(t.disputes).some(function(d){return d.status==="pending";});
+
+      // Score display: only show crossed-out AI score if disputes are approved
       var scoreHTML;
-      if(hasDisputes&&aiPct!==finalPct){
+      if(hasApprovedDisputes&&aiPct!==finalPct){
         scoreHTML="<div style='text-align:right'><div class='sc-old'>"+aiPct+"%</div><div class='sc' style='color:"+ts.t+";'>"+finalPct+"%</div><div class='sc-d'>Disputed</div></div>";
+      } else if(hasPendingDisputes){
+        scoreHTML="<div style='text-align:right'><div class='sc' style='color:"+ts.t+";'>"+aiPct+"%</div><div class='sc-d' style='color:#92400e'>Pending dispute</div></div>";
       } else {
         scoreHTML="<div class='sc' style='color:"+ts.t+";'>"+finalPct+"%</div>";
       }
@@ -3064,7 +3079,7 @@ Rules:
       var dispPassed=dispSc?(!t.autofail&&dispSc.pct>=85):false;
       var finalScores=matrix.map(function(c){
         var d=t.disputes&&t.disputes[c.id];
-        return d?d.finalScore:((t.aiScores&&t.aiScores[c.id])||"");
+        return (d&&d.status==="approved")?d.finalScore:((t.aiScores&&t.aiScores[c.id])||"");
       });
       rows.push([t.week,t.agentName,t.reviewer,t.ticketId,t.contactReason,
         (t.aiScore||t.finalScore)+"%",t.passed?"PASS":"FAIL",
