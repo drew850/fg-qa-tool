@@ -2,10 +2,17 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.55
+  Version:  2.0.56
   Date:     2026-06-09
 
   Changelog:
+  v2.0.56 (2026-06-09)
+    - Fix: disputes JSON failing to parse when justification text contains apostrophes
+    - The .replace(/'/g,'"') was converting apostrophes to double quotes, breaking JSON.parse
+    - New safeParse() helper: tries clean JSON.parse first, falls back to replace only for legacy data
+    - Applied to all JSON fields: disputes, scores, justifications, autofails
+    - Add version number to login card (monospace, muted)
+
   v2.0.55 (2026-06-09)
     - Fix: hasDisputes, autofail, autofailManual, messageCount, reauditHistory
       were missing from loadTicketsFromNotion property mapping
@@ -570,7 +577,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.55";
+const APP_VERSION = "v2.0.56";
 const REPORTS_DB_ID = "3684e96c994180db8929c67f306c554a";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
@@ -909,23 +916,28 @@ function tryParseJSON(txt) {
 }
 
 function parseNotionRow(r) {
+  function safeParse(str, fallback) {
+    if(!str) return fallback;
+    try { return JSON.parse(str); } catch(e) {}
+    try { return JSON.parse(str.replace(/'/g,'"')); } catch(e) {}
+    return fallback;
+  }
   let aiScores = {}, disputes = {}, justifications = {}, autofails = [];
-  try { aiScores = JSON.parse((r.scoresJSON || r["Scores JSON"] || "{}").replace(/'/g,'"')); } catch(e) {}
-  try { disputes = JSON.parse((r.disputesJSON||r["Disputes JSON"]||"").replace(/'/g,'"')); } catch(e) {}
-  try {
-    var rawJust = JSON.parse((r.justificationsJSON || r["Justifications JSON"] || "{}").replace(/'/g,'"'));
-    // Handle both compressed format {r,i} and full format {reason,improve}
-    Object.entries(rawJust).forEach(function(e){
-      var k=e[0],v=e[1];
-      if(v&&typeof v==="object"){
-        justifications[k]={
-          reason: v.reason||v.r||"",
-          improve: v.improve||v.i||null,
-          sample: v.sample||null
-        };
-      }
-    });
-  } catch(e) {}
+  aiScores  = safeParse(r.scoresJSON       || r["Scores JSON"]       || "{}", {});
+  disputes  = safeParse(r.disputesJSON     || r["Disputes JSON"]     || "",   {});
+  autofails = safeParse(r.autofailsJSON    || r["Autofails JSON"]    || "",   []);
+  var rawJust = safeParse(r.justificationsJSON || r["Justifications JSON"] || "{}", {});
+  // Handle both compressed format {r,i} and full format {reason,improve}
+  Object.entries(rawJust).forEach(function(e){
+    var k=e[0],v=e[1];
+    if(v&&typeof v==="object"){
+      justifications[k]={
+        reason: v.reason||v.r||"",
+        improve: v.improve||v.i||null,
+        sample: v.sample||null
+      };
+    }
+  });
   // Override with per-category notes fields if present (full text, no truncation)
   var catNoteMap={
     ctf:"ctfNotes",empathy:"empathyNotes",fcr:"fcrNotes",product:"productNotes",
@@ -943,7 +955,6 @@ function parseNotionRow(r) {
       };
     }
   });
-  try { autofails = JSON.parse((r.autofailsJSON||r["Autofails JSON"]||"").replace(/'/g,'"')); } catch(e) {}
   // Support both camelCase (our mapped names) and "Title Case" (direct Notion field names)
   const ticketId  = r.ticketId  || r["Ticket ID"]  || r.title || "";
   const agentName = r.agentName || r["Agent"]       || r.agent || "";
@@ -3109,7 +3120,9 @@ Rules:
       patch["Notes History JSON"] = {rich_text:[{text:{content:historyStr}}]};
       var currentJustJSON = ticket.justificationsJSON||"{}";
       var justObj = {};
-      try { justObj = JSON.parse(currentJustJSON.replace(/'/g,'"')); } catch(e){}
+      try { justObj = JSON.parse(currentJustJSON); } catch(e) {
+        try { justObj = JSON.parse(currentJustJSON.replace(/'/g,'"')); } catch(e2){}
+      }
       if(!justObj[catId]) justObj[catId]={};
       justObj[catId].reason = noteEditValue.trim();
       justObj[catId].improve = improveVal;
@@ -4243,6 +4256,7 @@ Rules:
           <p style={{fontSize:"11px",color:"var(--color-text-secondary)",textAlign:"center",marginTop:"8px",marginBottom:0}}>
             Use your @myfreebird.com Google account to sign in
           </p>
+          <p style={{fontSize:"10px",color:"var(--color-text-secondary)",textAlign:"center",marginTop:"12px",marginBottom:0,opacity:0.5,fontFamily:"var(--font-mono)"}}>{APP_VERSION}</p>
         </div>
       </div>
     );
