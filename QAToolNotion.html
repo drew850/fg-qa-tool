@@ -2,10 +2,18 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.54
-  Date:     2026-06-06
+  Version:  2.0.55
+  Date:     2026-06-09
 
   Changelog:
+  v2.0.55 (2026-06-09)
+    - Fix: hasDisputes, autofail, autofailManual, messageCount, reauditHistory
+      were missing from loadTicketsFromNotion property mapping
+    - hasDisputes never loaded from Notion — caused D badge to never show
+      and disputes to appear empty in Review tab despite existing in Notion
+    - autofail checkbox also never loaded — autofail state could be wrong on load
+    - messageCount and reauditHistory now correctly loaded via direct checkbox/number access
+
   v2.0.54 (2026-06-06)
     - Fix: "return outside of function" — App function was closing at line 1917
     - Caused by orphaned handleDeleteClick body left outside App when reaudit functions were added
@@ -562,7 +570,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.54";
+const APP_VERSION = "v2.0.55";
 const REPORTS_DB_ID = "3684e96c994180db8929c67f306c554a";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
@@ -740,6 +748,11 @@ async function loadTicketsFromNotion(dbId, onStatus) {
     deletedBy: getProp(page,"Deleted By")||"", deletedAt: getProp(page,"Deleted At")||"", deleteReason: getProp(page,"Delete Reason")||"",
     notesHistoryJSON: getProp(page,"Notes History JSON")||"{}", reopenHistoryJSON: getProp(page,"Reopen History JSON")||"[]",
     auditType: getProp(page,"Audit Type")||"AI Batch",
+    hasDisputes:   page.properties&&page.properties["Has Disputes"]&&page.properties["Has Disputes"].checkbox||false,
+    autofail:      page.properties&&page.properties["Autofail"]&&page.properties["Autofail"].checkbox||false,
+    autofailManual:page.properties&&page.properties["Autofail Manual"]&&page.properties["Autofail Manual"].checkbox||false,
+    messageCount:  page.properties&&page.properties["Message Count"]&&page.properties["Message Count"].number||null,
+    reauditHistory: getProp(page,"Reaudit History")||"[]",
   }));
 }
 
