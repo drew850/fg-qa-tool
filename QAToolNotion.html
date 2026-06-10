@@ -6,6 +6,11 @@
   Date:     2026-06-09
 
   Changelog:
+  v2.0.58 (2026-06-11)
+    - Retry on 502/503/504 upstream errors in scoring (up to 2 retries, 3s delay) — silent retry before surfacing error
+    - Re-audit error modal: friendlier message for timeout/upstream errors + Try Again button
+    - Replace error modal: friendlier message for timeout/upstream errors + Try Again button
+
   v2.0.57 (2026-06-09)
     - Fix: calcDisputedScore now only uses approved disputes for score calculation
     - Pending and rejected disputes no longer inflate reported scores
@@ -585,7 +590,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.57";
+const APP_VERSION = "v2.0.58";
 const REPORTS_DB_ID = "3684e96c994180db8929c67f306c554a";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
@@ -690,17 +695,24 @@ async function callClaudeInsights(prompt) {
   return (data.content || []).filter(b => b.type === "text").map(b => b.text).join("\n");
 }
 
-// Retry on 429 rate limit with exponential backoff
+// Retry on 429 rate limit with exponential backoff, and on 502/503/504 upstream errors with flat 3s delay
 async function callClaudeWithRetry(prompt, maxRetries=4) {
+  var upstreamRetries = 0;
+  var maxUpstreamRetries = 2;
   for (var attempt=0; attempt<=maxRetries; attempt++) {
     try {
       return await callClaude(prompt);
     } catch(e) {
       var is429 = e.message && e.message.includes("429");
+      var isUpstream = e.message && (e.message.includes("502") || e.message.includes("503") || e.message.includes("504"));
       if (is429 && attempt < maxRetries) {
         var wait = Math.pow(2, attempt) * 3000; // 3s, 6s, 12s, 24s
         console.log("[QA] Rate limited, waiting " + (wait/1000) + "s...");
         await new Promise(function(r){setTimeout(r, wait);});
+      } else if (isUpstream && upstreamRetries < maxUpstreamRetries) {
+        upstreamRetries++;
+        console.log("[QA] Upstream error, retry " + upstreamRetries + "/" + maxUpstreamRetries + " in 3s...");
+        await new Promise(function(r){setTimeout(r, 3000);});
       } else {
         throw e;
       }
@@ -6709,9 +6721,18 @@ Rules:
               <div style={{textAlign:"center",padding:"8px 0 16px"}}>
                 <div style={{fontSize:"36px",marginBottom:"12px"}}>⚠️</div>
                 <h3 style={{fontSize:"16px",fontWeight:600,margin:"0 0 8px",color:"var(--color-text-danger)"}}>Re-audit failed</h3>
-                <p style={{fontSize:"13px",color:"var(--color-text-secondary)",margin:"0 0 8px",lineHeight:"1.6"}}>{reauditModal.error}</p>
+                {(reauditModal.error&&(reauditModal.error.includes("502")||reauditModal.error.includes("503")||reauditModal.error.includes("504")||reauditModal.error.includes("upstream error")))?
+                  <p style={{fontSize:"13px",color:"var(--color-text-secondary)",margin:"0 0 8px",lineHeight:"1.6"}}>Scoring timed out — the AI service took too long to respond. You can try again safely.</p>
+                :
+                  <p style={{fontSize:"13px",color:"var(--color-text-secondary)",margin:"0 0 8px",lineHeight:"1.6"}}>{reauditModal.error}</p>
+                }
                 <p style={{fontSize:"12px",fontWeight:600,color:"var(--color-text-warning)",margin:"0 0 20px"}}>Original audit was not changed.</p>
-                <button onClick={function(){setReauditModal(null);}} style={{...ghost,padding:"10px 24px",fontSize:"13px"}}>Close</button>
+                <div style={{display:"flex",gap:"10px",justifyContent:"center"}}>
+                  {(reauditModal.error&&(reauditModal.error.includes("502")||reauditModal.error.includes("503")||reauditModal.error.includes("504")||reauditModal.error.includes("upstream error")))&&
+                    <button onClick={function(){setReauditModal(function(r){return Object.assign({},r,{step:"scoring",error:""});});proceedReaudit();}} style={{...btnSuccess,padding:"10px 24px",fontSize:"13px"}}>Try Again</button>
+                  }
+                  <button onClick={function(){setReauditModal(null);}} style={{...ghost,padding:"10px 24px",fontSize:"13px"}}>Close</button>
+                </div>
               </div>
             </>)}
 
@@ -6834,11 +6855,20 @@ Rules:
               <div style={{textAlign:"center",padding:"8px 0 16px"}}>
                 <div style={{fontSize:"36px",marginBottom:"12px"}}>⚠️</div>
                 <h3 style={{fontSize:"16px",fontWeight:600,margin:"0 0 8px",color:"var(--color-text-danger)"}}>Something went wrong</h3>
-                <p style={{fontSize:"13px",color:"var(--color-text-secondary)",margin:"0 0 8px",lineHeight:"1.6"}}>{deleteModal.error}</p>
+                {(deleteModal.error&&(deleteModal.error.includes("502")||deleteModal.error.includes("503")||deleteModal.error.includes("504")||deleteModal.error.includes("upstream error")))?
+                  <p style={{fontSize:"13px",color:"var(--color-text-secondary)",margin:"0 0 8px",lineHeight:"1.6"}}>Scoring timed out — the AI service took too long to respond. You can try again safely.</p>
+                :
+                  <p style={{fontSize:"13px",color:"var(--color-text-secondary)",margin:"0 0 8px",lineHeight:"1.6"}}>{deleteModal.error}</p>
+                }
                 <p style={{fontSize:"12px",fontWeight:600,color:"var(--color-text-warning)",margin:"0 0 20px"}}>
                   Ticket #{deleteModal.ticket.ticketId} was not deleted.
                 </p>
-                <button onClick={function(){setDeleteModal(null);}} style={{...ghost,padding:"10px 24px",fontSize:"13px"}}>Close</button>
+                <div style={{display:"flex",gap:"10px",justifyContent:"center"}}>
+                  {(deleteModal.error&&(deleteModal.error.includes("502")||deleteModal.error.includes("503")||deleteModal.error.includes("504")||deleteModal.error.includes("upstream error")))&&deleteModal.replacement&&
+                    <button onClick={function(){setDeleteModal(function(d){return Object.assign({},d,{step:"found",error:""});});handleDeleteProceed();}} style={{...btnSuccess,padding:"10px 24px",fontSize:"13px"}}>Try Again</button>
+                  }
+                  <button onClick={function(){setDeleteModal(null);}} style={{...ghost,padding:"10px 24px",fontSize:"13px"}}>Close</button>
+                </div>
               </div>
             </>)}
 
