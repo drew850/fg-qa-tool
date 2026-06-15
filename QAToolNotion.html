@@ -6,6 +6,9 @@
   Date:     2026-06-09
 
   Changelog:
+  v2.0.61 (2026-06-11)
+    - Fix: calcDisputedScore now treats disputes with no status field as approved — legacy disputes (pre-status schema) were being skipped, causing wrong final score display
+
   v2.0.60 (2026-06-11)
     - Fix: calcDisputedScore now handles legacy bare-label dispute finalScores ("Pass","YES","NO","Partial") — disputes saved before points-in-parens format now score correctly instead of being skipped
 
@@ -596,7 +599,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.60";
+const APP_VERSION = "v2.0.61";
 const REPORTS_DB_ID = "3684e96c994180db8929c67f306c554a";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
@@ -1134,7 +1137,7 @@ function calcDisputedScore(ticket, matrix) {
   const merged = {};
   matrix.forEach(c => {
     const d = ticket.disputes && ticket.disputes[c.id];
-    const useDispute = d && d.status === "approved";
+    const useDispute = d && (d.status === "approved" || !d.status); // no status = legacy dispute, treat as approved
     var score = useDispute ? normalizeDisputeScore(d.finalScore, c) : ((ticket.aiScores && ticket.aiScores[c.id]) || "");
     merged[c.id] = score;
   });
