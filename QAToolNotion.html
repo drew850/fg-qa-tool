@@ -6,6 +6,9 @@
   Date:     2026-06-09
 
   Changelog:
+  v2.0.62 (2026-06-11)
+    - Fix: Re-audit no longer blocked by missing messageCount — null count treated as 0, new message check handles it downstream
+
   v2.0.61 (2026-06-11)
     - Fix: calcDisputedScore now treats disputes with no status field as approved — legacy disputes (pre-status schema) were being skipped, causing wrong final score display
 
@@ -599,7 +602,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.61";
+const APP_VERSION = "v2.0.62";
 const REPORTS_DB_ID = "3684e96c994180db8929c67f306c554a";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
@@ -1854,12 +1857,7 @@ function App() {
 
   function handleReauditClick(ticket) {
     console.log("[Reaudit][0] Re-audit clicked for ticket #"+ticket.ticketId);
-    // Pre-check: messageCount must be recorded
-    if(!ticket.messageCount) {
-      console.log("[Reaudit][0] Blocked — no messageCount on record");
-      setReauditModal({step:"noMsgCount", ticket});
-      return;
-    }
+    // No pre-check on messageCount — missing count treated as 0, new message check handles it downstream
     setReauditModal({step:"confirm", ticket, newMsgCount:null, error:""});
   }
 
@@ -1876,7 +1874,7 @@ function App() {
         var msgs = msgResp.data||[];
         var newCount = msgs.length;
         console.log("[Reaudit][1] Current msgs:", newCount, "| Original:", rm.ticket.messageCount);
-        if(newCount <= rm.ticket.messageCount) {
+        if(newCount <= (rm.ticket.messageCount||0)) {
           console.log("[Reaudit][1] No new messages — blocking re-audit");
           setReauditModal(function(r){return Object.assign({},r,{step:"noNewMsgs", newMsgCount:newCount});});
           return;
