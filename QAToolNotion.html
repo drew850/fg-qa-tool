@@ -6,6 +6,9 @@
   Date:     2026-06-09
 
   Changelog:
+  v2.0.63 (2026-06-11)
+    - Fix: Re-audit — after save, local state now correctly passes raw JSON strings to parseNotionRow — fixes missing per-category scores/notes after re-audit without page refresh
+
   v2.0.62 (2026-06-11)
     - Fix: Re-audit no longer blocked by missing messageCount — null count treated as 0, new message check handles it downstream
 
@@ -602,7 +605,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.62";
+const APP_VERSION = "v2.0.63";
 const REPORTS_DB_ID = "3684e96c994180db8929c67f306c554a";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
@@ -1966,10 +1969,15 @@ function App() {
         newRecord.id = saved.id;
         console.log("[Reaudit][5] Saved. New page ID:", saved.id);
 
-        // Update local state
+        // Update local state — pass raw JSON strings so parseNotionRow reads them correctly
         setTickets(function(ts){
           return ts.filter(function(t){return t.notionPageId!==rm.ticket.notionPageId;})
-                   .concat([parseNotionRow(Object.assign({pageId:saved.id},newRecord))]);
+                   .concat([parseNotionRow(Object.assign({pageId:saved.id},newRecord,{
+                     scoresJSON:        JSON.stringify(newRecord.aiScores||newRecord.scores||{}),
+                     justificationsJSON:JSON.stringify(newRecord.justifications||{}),
+                     autofailsJSON:     JSON.stringify(newRecord.autofails||[]),
+                     disputesJSON:      "{}",
+                   }))]);
         });
         setDeletedTicketIds(function(prev){
           var next=new Set(prev);
