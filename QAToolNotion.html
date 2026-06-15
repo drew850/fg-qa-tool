@@ -6,6 +6,9 @@
   Date:     2026-06-09
 
   Changelog:
+  v2.0.60 (2026-06-11)
+    - Fix: calcDisputedScore now handles legacy bare-label dispute finalScores ("Pass","YES","NO","Partial") — disputes saved before points-in-parens format now score correctly instead of being skipped
+
   v2.0.59 (2026-06-11)
     - Fix: Auditor dropdown in Review tab now sourced from QA Users DB (full/edit roles) instead of ticket reviewer field — eliminates duplicate/stale name variants
 
@@ -593,7 +596,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.59";
+const APP_VERSION = "v2.0.60";
 const REPORTS_DB_ID = "3684e96c994180db8929c67f306c554a";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
@@ -1110,11 +1113,30 @@ function calcScore(scores, matrix) {
 }
 function calcDisputedScore(ticket, matrix) {
   // Only approved disputes affect the score — pending and rejected use AI score
+  // normalizeDisputeScore: converts bare labels ("Pass","YES","NO","Partial") to "LEVEL (points)" format
+  // Handles legacy disputes saved before the points-in-parens format was enforced
+  function normalizeDisputeScore(val, cat) {
+    if (!val) return val;
+    if (/\([\d.]+\)/.test(val)) return val; // already has points
+    var upper = val.toUpperCase();
+    if (cat && cat.levels) {
+      var match = cat.levels.find(function(l) {
+        return l.level.toUpperCase() === upper ||
+               (upper === "PASS" && l.level.toUpperCase().startsWith("YES")) ||
+               (upper === "MISS" && l.level.toUpperCase().startsWith("NO"));
+      });
+      if (match && match.points !== null && match.points !== undefined) {
+        return match.level + " (" + match.points + ")";
+      }
+    }
+    return val;
+  }
   const merged = {};
   matrix.forEach(c => {
     const d = ticket.disputes && ticket.disputes[c.id];
     const useDispute = d && d.status === "approved";
-    merged[c.id] = useDispute ? d.finalScore : ((ticket.aiScores && ticket.aiScores[c.id]) || "");
+    var score = useDispute ? normalizeDisputeScore(d.finalScore, c) : ((ticket.aiScores && ticket.aiScores[c.id]) || "");
+    merged[c.id] = score;
   });
   return calcScore(merged, matrix);
 }
