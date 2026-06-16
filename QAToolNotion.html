@@ -6,6 +6,12 @@
   Date:     2026-06-09
 
   Changelog:
+  v2.0.65 (2026-06-11)
+    - Fix: Replace all em dashes outside App() with ASCII equivalents -- Babel standalone was choking on Unicode em dashes during script transformation
+
+  v2.0.64 (2026-06-11)
+    - Fix: Transcript now saved to Notion on first-time batch QA audits — was missing from newResult record
+
   v2.0.63 (2026-06-11)
     - Fix: Re-audit — after save, local state now correctly passes raw JSON strings to parseNotionRow — fixes missing per-category scores/notes after re-audit without page refresh
 
@@ -605,7 +611,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.63";
+const APP_VERSION = "v2.0.65";
 const REPORTS_DB_ID = "3684e96c994180db8929c67f306c554a";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
@@ -699,7 +705,7 @@ async function callClaude(prompt) {
   return (data.content || []).filter(b => b.type === "text").map(b => b.text).join("\n");
 }
 
-// Use Sonnet for insights — much better analysis quality, worth the extra cost
+// Use Sonnet for insights -- much better analysis quality, worth the extra cost
 async function callClaudeInsights(prompt) {
   const data = await proxyFetch(
     "https://api.anthropic.com/v1/messages",
@@ -757,7 +763,7 @@ async function loadTicketsFromNotion(dbId, onStatus) {
     hasMore = data.has_more || false;
     cursor = data.next_cursor;
     log("Fetched " + pages.length + " tickets...");
-    // No early-exit cutoff here — load all non-deleted tickets for Review/Dashboard accuracy
+    // No early-exit cutoff here -- load all non-deleted tickets for Review/Dashboard accuracy
     if (!hasMore) break;
   }
 
@@ -825,7 +831,7 @@ async function loadConfigFromNotion(dbId, key) {
 async function saveConfigToNotion(dbId, key, value) {
   const fullJson = JSON.stringify(value);
   const CHUNK = 1900;
-  // Split into chunks — each stored as key, key__1, key__2, etc.
+  // Split into chunks -- each stored as key, key__1, key__2, etc.
   const chunks = [];
   for(let i=0; i<fullJson.length; i+=CHUNK) chunks.push(fullJson.slice(i,i+CHUNK));
   // If only one chunk, store as plain key (backwards compatible)
@@ -891,7 +897,7 @@ async function saveTicketToNotion(dbId, ticket) {
       });
       return JSON.stringify(cj).slice(0,1900);
     })()) },
-    // Per-category notes — full text, no truncation
+    // Per-category notes -- full text, no truncation
     "CTF Notes":       { rich_text: rt(formatNotes(ticket.justifications,"ctf")) },
     "Empathy Notes":   { rich_text: rt(formatNotes(ticket.justifications,"empathy")) },
     "FCR Notes":       { rich_text: rt(formatNotes(ticket.justifications,"fcr")) },
@@ -1091,7 +1097,7 @@ function AgentInsightRow({a, ats, matrix, scoreTone, scoreColor, T, resultBadge,
                 var rb=resultBadge(t);
                 return <tr key={t.id} style={{borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
                   <td style={{padding:"5px 6px",color:"var(--color-text-info)",fontWeight:500}}>{t.ticketId}</td>
-                  <td style={{padding:"5px 6px",color:"var(--color-text-secondary)",maxWidth:"160px",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.contactReason||"—"}</td>
+                  <td style={{padding:"5px 6px",color:"var(--color-text-secondary)",maxWidth:"160px",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.contactReason||"\u2014"}</td>
                   <td style={{padding:"5px 6px",fontWeight:600,color:scoreColor(t.finalScore)}}>{t.finalScore}%</td>
                   <td style={{padding:"5px 6px"}}><span style={{fontSize:"10px",fontWeight:700,padding:"1px 7px",borderRadius:"3px",background:rb.bg,color:rb.text,border:"1px solid "+rb.border}}>{rb.label}</span></td>
                 </tr>;
@@ -1121,7 +1127,7 @@ function calcScore(scores, matrix) {
   return max === 0 ? null : { pts, max, pct: Math.round((pts / max) * 100) };
 }
 function calcDisputedScore(ticket, matrix) {
-  // Only approved disputes affect the score — pending and rejected use AI score
+  // Only approved disputes affect the score -- pending and rejected use AI score
   // normalizeDisputeScore: converts bare labels ("Pass","YES","NO","Partial") to "LEVEL (points)" format
   // Handles legacy disputes saved before the points-in-parens format was enforced
   function normalizeDisputeScore(val, cat) {
@@ -1236,7 +1242,7 @@ function getDefaultMatrix() {
       { level: "YES", points: 1, definition: "Agent directly acknowledges the customer's specific concern by name or description. Recognizes the impact or inconvenience where appropriate. Tone matches the emotional weight of the issue. Response feels human and attentive." },
       { level: "PARTIAL", points: 0.5, definition: "Agent uses a generic acknowledgment not tailored to the specific issue (e.g. 'Sorry for the inconvenience' with no reference to what the issue actually was). Tone is neutral when the situation called for warmer acknowledgment." },
       { level: "NO", points: 0, definition: "No acknowledgment of the customer's issue or inconvenience. Response jumps directly to policy or resolution without any recognition. Tone feels abrupt or mechanical. Customer emotion is completely ignored." },
-      { level: "NA", points: null, definition: "Strictly informational ticket with no emotional context — simple status check, tracking inquiry, or factual question with no frustration or inconvenience present." }
+      { level: "NA", points: null, definition: "Strictly informational ticket with no emotional context \u2014 simple status check, tracking inquiry, or factual question with no frustration or inconvenience present." }
     ]},
     { id: "fcr", label: "First Contact Resolution", max: 1, whatItMeasures: "Did the agent provide a complete, clear response in their first reply that either resolved the issue or set clear expectations for what would happen next? If full resolution was not possible on the first reply (e.g. waiting on customer confirmation, troubleshooting needed, more info required), did the agent provide everything possible to avoid unnecessary back-and-forth? This category focuses on completeness and clarity, not speed or tone.", levels: [
       { level: "YES", points: 1, definition: "The first response either fully resolved the issue or clearly outlined next steps while proactively addressing likely follow-up questions (e.g. timelines, what happens next, what the customer needs to do). If escalation was needed, agent explained why, what will happen, and when the customer can expect an update." },
@@ -1253,7 +1259,7 @@ function getDefaultMatrix() {
       { level: "YES", points: 1, definition: "Agent followed the documented workflow for editing, canceling the order, or canceling the subscription. Actions taken in Shopify and ShipMonk were consistent with each other. Order or subscription status reflects the intended outcome. No conflicting states between systems. Customer was clearly informed of the significant action taken (e.g. cancellation confirmed, order edited, refund initiated)." },
       { level: "PARTIAL", points: 0.5, definition: "Agent followed most of the required steps but missed one minor step or left a minor inconsistency between systems. OR agent completed the process correctly but failed to communicate the action taken to the customer. OR agent communicated the update to the customer but the system execution had a minor gap. Core outcome was achieved but execution was not fully complete." },
       { level: "NO", points: 0, definition: "Agent missed one or more required steps or left the order or subscription in an incorrect or inconsistent state. Edited or canceled in one system but not the other. Required steps skipped or performed incorrectly. Order or subscription left in a state that could cause shipment, charge, refund, or reporting errors. Agent took significant action without communicating it to the customer." },
-      { level: "NA", points: null, definition: "Ticket did not involve any changes to an order or subscription. Ticket was informational only — status check, question, or policy inquiry with no edits or cancellations required or attempted. Score based on process execution, not customer outcome. Do not penalize agents for system limitations outside their control." }
+      { level: "NA", points: null, definition: "Ticket did not involve any changes to an order or subscription. Ticket was informational only \u2014 status check, question, or policy inquiry with no edits or cancellations required or attempted. Score based on process execution, not customer outcome. Do not penalize agents for system limitations outside their control." }
     ]},
     { id: "returns", label: "Returns and Replacements", max: 2, whatItMeasures: "Did the agent follow the correct process when handling a return or warranty replacement, including offering all required options, verifying eligibility, and executing the correct next steps? This includes returns and replacements related to subscriptions. This category focuses on process correctness, customer choice, and risk prevention.", levels: [
       { level: "YES", points: 2, definition: "For returns: Agent offered all applicable return options including full return, paid return label (if applicable), and 50% refund-to-keep option (when eligible). Agent waited for the customer's selection before proceeding. Once the customer responded, agent followed the appropriate steps based on that selection. Customer expectations were clear. For warranty replacements: Agent verified the product issue before processing. Proof was requested and reviewed (photo or video). Agent confirmed the shipping address before placing the replacement order. For subscription-related returns or replacements: Agent followed the same verification and option-presentation steps." },
@@ -2217,6 +2223,7 @@ function App() {
           justifications:parsed.justifications||{},
           customerEmail:ticket.customerEmail,
           savedAt:new Date().toISOString(),
+          transcript:ticket.transcript||"",
         };
         // Save to Notion immediately
         setBatchStatus("Saving #"+ticket.ticketId+" to Notion...");
