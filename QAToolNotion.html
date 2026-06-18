@@ -6,6 +6,13 @@
   Date:     2026-06-09
 
   Changelog:
+  v2.0.67 (2026-06-19) -- SECURITY (Batch 1; deploy WITH server.py)
+    - Notion + Anthropic API keys no longer sent to the browser; /proxy injects them server-side by host
+    - /proxy and /gorgias now require a valid session token (X-Session-Token header)
+    - /proxy restricted to an allowlist (api.notion.com, api.anthropic.com) -- closes SSRF/open-relay
+    - inject_env now json.dumps-escapes all values; find_user_by_email is strict Notion-only (no domain fallback)
+    - Login stores session token before loadUsersFromNotion so login-time proxy calls authenticate
+
   v2.0.66 (2026-06-11)
     - Fix: Pin @babel/standalone to v7.23.10 -- unversioned CDN load was pulling a breaking Babel update
 
@@ -611,16 +618,16 @@ const { useState, useEffect, useRef, useCallback } = React;
 
 
 // ── CONFIG ──────────────────────────────────────────────────────────────
-const NOTION_TOKEN = (window.__ENV__&&window.__ENV__.NOTION_TOKEN)||window.NOTION_TOKEN||"";
+// SECURITY: NOTION_TOKEN and ANTHROPIC_KEY are no longer sent to the client.
+// The Python /proxy injects them server-side based on destination host.
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.66";
+const APP_VERSION = "v2.0.67";
 const REPORTS_DB_ID = "3684e96c994180db8929c67f306c554a";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
 const CONFIG_DB_ID = "3574e96c994180c08a40f31e89db80ce";
 const HARDCODED_SETUP = { ticketsDbId: TICKETS_DB_ID, configDbId: CONFIG_DB_ID };
-const ANTHROPIC_KEY = (window.__ENV__&&window.__ENV__.ANTHROPIC_KEY)||window.ANTHROPIC_KEY||"";
 const PASS_THRESHOLD = 85;
 
 // Role: "full" = all access, "edit" = can QA + dispute, "view" = read-only
@@ -669,13 +676,16 @@ const USERS = {
 const PROXY = window.location.origin + "/proxy";
 
 async function proxyFetch(targetUrl, method, headers, body) {
-  // Send API keys in the body wrapper so they don't get blocked by CORS preflight
+  // Credentials (Notion/Anthropic keys) are injected by the server based on host.
+  // We only send the session token so the proxy can authenticate the request.
   const res = await fetch(PROXY + "?url=" + encodeURIComponent(targetUrl), {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "X-Session-Token": sessionStorage.getItem("qa_session") || ""
+    },
     body: JSON.stringify({
       _method: method || "GET",
-      _headers: headers,
       _body: body
     })
   });
@@ -687,22 +697,15 @@ async function proxyFetch(targetUrl, method, headers, body) {
 }
 
 async function notionAPI(path, method, body) {
-  return proxyFetch(
-    "https://api.notion.com" + path,
-    method || "GET",
-    {
-      "Authorization": "Bearer " + NOTION_TOKEN,
-      "Notion-Version": NOTION_VERSION,
-    },
-    body
-  );
+  // No auth header from client — server attaches the Notion token.
+  return proxyFetch("https://api.notion.com" + path, method || "GET", null, body);
 }
 
 async function callClaude(prompt) {
   const data = await proxyFetch(
     "https://api.anthropic.com/v1/messages",
     "POST",
-    { "x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01" },
+    null,
     { model: "claude-haiku-4-5-20251001", max_tokens: 4000, messages: [{ role: "user", content: prompt }] }
   );
   return (data.content || []).filter(b => b.type === "text").map(b => b.text).join("\n");
@@ -713,7 +716,7 @@ async function callClaudeInsights(prompt) {
   const data = await proxyFetch(
     "https://api.anthropic.com/v1/messages",
     "POST",
-    { "x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01" },
+    null,
     { model: "claude-sonnet-4-5", max_tokens: 8000, messages: [{ role: "user", content: prompt }] }
   );
   return (data.content || []).filter(b => b.type === "text").map(b => b.text).join("\n");
@@ -1541,6 +1544,12 @@ function App() {
     var session=await verifySession(token);
     if(session){
       var em=session.email.toLowerCase().trim();
+
+      // Session is server-valid — store the token now so the proxy calls made
+      // during login (e.g. loadUsersFromNotion) authenticate. Removed below if
+      // the user turns out not to be authorized.
+      sessionStorage.setItem("qa_session",token);
+      setSessionToken(token);
 
       // Load users from Notion first so we have the latest list
       var users = await loadUsersFromNotion();
@@ -3482,7 +3491,7 @@ Rules:
   async function gorgiasAPI(endpoint, params, method) {
     var resp = await fetch(window.location.origin+"/gorgias", {
       method: "POST",
-      headers: {"Content-Type":"application/json"},
+      headers: {"Content-Type":"application/json","X-Session-Token":sessionStorage.getItem("qa_session")||""},
       body: JSON.stringify({endpoint: endpoint, params: params||{}, method: method||"GET"})
     });
     if(resp.status === 429) return {_status: 429};

@@ -18,6 +18,9 @@ EMERGENCY_PIN       = os.environ.get("EMERGENCY_PIN", "")
 
 ALLOWED_DOMAINS     = {"myfreebird.com", "freedom-grooming.com"}
 
+# SECURITY: /proxy may only forward to these hosts (prevents SSRF / open-relay abuse)
+PROXY_ALLOWED_HOSTS = {"api.notion.com", "api.anthropic.com"}
+
 # In-memory session store: token -> {email, name, exp}
 SESSIONS = {}
 SESSION_TTL = 60 * 60 * 24 * 7  # 7 days
@@ -267,31 +270,31 @@ def fetch_qa_users_from_notion():
     return users
 
 def find_user_by_email(email):
-    """Return user dict if email matches any active Notion user, else domain-based view fallback."""
+    """Return user dict if email matches an active Notion user, else None (strict, no domain fallback)."""
     email_lower = email.lower().strip()
     for u in fetch_qa_users_from_notion():
         if u["email"] == email_lower:
             return u
-    domain = email_lower.split("@")[-1] if "@" in email_lower else ""
-    if domain in ALLOWED_DOMAINS:
-        return {"email": email_lower, "name": email_lower.split("@")[0].replace(".", " ").title(), "role": "view"}
     return None
 
 def inject_env(html: bytes) -> bytes:
     import json as _json
+    # SECURITY: NOTION_TOKEN and ANTHROPIC_KEY are intentionally NOT exposed to the
+    # client. The /proxy handler injects them server-side based on the destination
+    # host, so the keys never reach the browser. Only non-secret config is shipped.
+    env = {
+        "GOOGLE_CLIENT_ID":   GOOGLE_CLIENT_ID,
+        "BASE_URL":           BASE_URL,
+        "GORGIAS_DOMAIN":     GORGIAS_DOMAIN,
+        "GORGIAS_CONFIGURED": bool(GORGIAS_USERNAME and GORGIAS_API_KEY),
+        "QA_USERS_DB_ID":     QA_USERS_DB_ID,
+    }
     snippet = (
-        f'<script>window.__ENV__={{'
-        f'NOTION_TOKEN:"{NOTION_TOKEN}",'
-        f'ANTHROPIC_KEY:"{ANTHROPIC_KEY}",'
-        f'GOOGLE_CLIENT_ID:"{GOOGLE_CLIENT_ID}",'
-        f'BASE_URL:"{BASE_URL}",'
-        f'GORGIAS_DOMAIN:"{GORGIAS_DOMAIN}",'
-        f'GORGIAS_CONFIGURED:{"true" if GORGIAS_USERNAME and GORGIAS_API_KEY else "false"},'
-        f'QA_USERS_DB_ID:"{QA_USERS_DB_ID}"'
-        f'}};'
-        f'window.__CR_L1_OPTIONS={_json.dumps(CR_L1_OPTIONS)};'
-        f'window.__CR_L2_OPTIONS={_json.dumps(CR_L2_OPTIONS)};'
-        f'</script>'
+        "<script>"
+        f"window.__ENV__={_json.dumps(env)};"
+        f"window.__CR_L1_OPTIONS={_json.dumps(CR_L1_OPTIONS)};"
+        f"window.__CR_L2_OPTIONS={_json.dumps(CR_L2_OPTIONS)};"
+        "</script>"
     )
     return html.replace(b"</head>", snippet.encode() + b"</head>", 1)
 
@@ -369,6 +372,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
         print(f"[{self.address_string()}] {fmt % args}")
+
+    def _session(self):
+        """Return the verified session for this request, or None. Reads token from
+        X-Session-Token header (preferred) or Authorization: Bearer fallback."""
+        tok = self.headers.get("X-Session-Token", "")
+        if not tok:
+            tok = self.headers.get("Authorization", "").replace("Bearer ", "")
+        return verify_session(tok.strip())
 
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -559,6 +570,9 @@ class Handler(BaseHTTPRequestHandler):
 
         # ── Gorgias proxy ─────────────────────────────────────────────────
         if path == "/gorgias":
+            if not self._session():
+                self._json({"error": "unauthorized"}, 401)
+                return
             if not GORGIAS_USERNAME or not GORGIAS_API_KEY:
                 self._json({"error": "Gorgias credentials not configured"}, 500)
                 return
@@ -609,19 +623,27 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"error": str(e)}, 502)
             return
 
-        # ── General proxy ─────────────────────────────────────────────────
+        # ── General proxy (Notion + Anthropic only, session-gated) ────────
         if not self.path.startswith("/proxy"):
             self.send_response(404)
             self.end_headers()
             return
 
+        # Require a valid session — the proxy holds the real API keys
+        if not self._session():
+            self._json({"error": "unauthorized"}, 401)
+            return
+
         qs     = parse_qs(urlparse(self.path).query)
         target = unquote(qs.get("url", [""])[0])
         if not target.startswith("https://"):
-            self.send_response(400)
-            self._cors()
-            self.end_headers()
-            self.wfile.write(b'{"error":"bad url"}')
+            self._json({"error": "bad url"}, 400)
+            return
+
+        # Host allowlist — prevents SSRF / open-relay abuse
+        host = urlparse(target).hostname or ""
+        if host not in PROXY_ALLOWED_HOSTS:
+            self._json({"error": f"host not allowed: {host}"}, 403)
             return
 
         length     = int(self.headers.get("Content-Length", 0))
@@ -630,13 +652,19 @@ class Handler(BaseHTTPRequestHandler):
         except: wrapper = {}
 
         method     = wrapper.get("_method", "POST")
-        hdrs       = wrapper.get("_headers", {})
         body_obj   = wrapper.get("_body")
         body_bytes = json.dumps(body_obj).encode() if body_obj is not None else None
 
+        # Credentials are injected SERVER-SIDE based on destination host.
+        # Any client-supplied auth headers (_headers) are ignored — keys never
+        # leave the server.
         fwd = {"Content-Type": "application/json"}
-        for k, v in hdrs.items():
-            if v: fwd[k] = str(v)
+        if host == "api.notion.com":
+            fwd["Authorization"]  = f"Bearer {NOTION_TOKEN}"
+            fwd["Notion-Version"] = "2022-06-28"
+        elif host == "api.anthropic.com":
+            fwd["x-api-key"]         = ANTHROPIC_KEY
+            fwd["anthropic-version"] = "2023-06-01"
 
         try:
             req  = urllib.request.Request(target, data=body_bytes, headers=fwd, method=method)
