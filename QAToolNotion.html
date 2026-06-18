@@ -6,6 +6,12 @@
   Date:     2026-06-09
 
   Changelog:
+  v2.0.68 (2026-06-19) -- HOTFIX (HTML only)
+    - Fix: runQAOnFetched called setActiveTab (undefined) -- corrected to setView; batch QA no longer throws on completion
+    - Fix: batch QA, batch-save, and replace paths now record the Notion page id on the local ticket
+      (was discarded -> notionPageId undefined -> autofail/edit actions hit /v1/pages/undefined 400)
+    - Guard: mark/remove autofail now blocks with a clear message if a ticket has no saved page id
+
   v2.0.67 (2026-06-19) -- SECURITY (Batch 1; deploy WITH server.py)
     - Notion + Anthropic API keys no longer sent to the browser; /proxy injects them server-side by host
     - /proxy and /gorgias now require a valid session token (X-Session-Token header)
@@ -622,7 +628,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 // The Python /proxy injects them server-side based on destination host.
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.67";
+const APP_VERSION = "v2.0.68";
 const REPORTS_DB_ID = "3684e96c994180db8929c67f306c554a";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
@@ -1870,9 +1876,10 @@ function App() {
     };
 
     console.log("[Replace][4] Saving replacement to Notion. Auditor:", auditor, "Passed:", newResult.passed);
-    await saveTicketToNotion(TICKETS_DB_ID, newResult);
+    var savedR = await saveTicketToNotion(TICKETS_DB_ID, newResult);
+    if(savedR && savedR.id){ newResult.notionPageId = savedR.id; newResult.id = savedR.id; }
     setTickets(function(prev){return prev.concat([newResult]);});
-    console.log("[Replace][4] Saved successfully");
+    console.log("[Replace][4] Saved successfully (pageId:", newResult.notionPageId+")");
     return newResult;
   }
 
@@ -2240,7 +2247,8 @@ function App() {
         // Save to Notion immediately
         setBatchStatus("Saving #"+ticket.ticketId+" to Notion...");
         try {
-          await saveTicketToNotion(TICKETS_DB_ID, newResult);
+          var savedA = await saveTicketToNotion(TICKETS_DB_ID, newResult);
+          if(savedA && savedA.id){ newResult.notionPageId = savedA.id; newResult.id = savedA.id; }
           setTickets(function(prev){return prev.concat([newResult]);});
         } catch(saveErr) {
           console.error("Save failed for",ticket.ticketId,saveErr);
@@ -2280,6 +2288,7 @@ function App() {
       try {
         var result = await saveTicketToNotion(TICKETS_DB_ID, valid[i]);
         if(!result || !result.id) throw new Error("No page ID returned");
+        valid[i].notionPageId = result.id; valid[i].id = result.id;
         saved++;
         setBatchStatus("Saved "+(i+1)+" of "+valid.length+"...");
       } catch(e) {
@@ -3257,6 +3266,7 @@ Rules:
   // ── MANUAL AUTOFAIL ──────────────────────────────────────────────────────────
   async function saveManualAutofail(ticket, condition) {
     if(!condition) { addToast("Please select an autofail condition","error"); return; }
+    if(!ticket.notionPageId) { addToast("This ticket has no saved Notion record yet — Sync Notion and reopen it first.","error"); return; }
     setSavingAutofail(true);
     try {
       var now = new Date().toISOString();
@@ -3278,6 +3288,7 @@ Rules:
 
   async function removeManualAutofail(ticket, reason) {
     if(!reason||!reason.trim()) { addToast("Please enter a justification","error"); return; }
+    if(!ticket.notionPageId) { addToast("This ticket has no saved Notion record yet — Sync Notion and reopen it first.","error"); return; }
     setSavingAutofail(true);
     try {
       var now = new Date().toISOString();
@@ -3804,7 +3815,7 @@ Rules:
     // Map fetched tickets to QA batch format and start batch QA
     var mapped = fetchedTickets.map(mapFetchedToQA);
     setBatchTickets(mapped);
-    setActiveTab("batch");
+    setView("batch");
     addToast("Loaded "+mapped.length+" tickets into Batch QA — ready to score");
   }
 
