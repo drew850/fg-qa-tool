@@ -6,6 +6,20 @@
   Date:     2026-06-09
 
   Changelog:
+  v2.0.71 (2026-06-23) -- HOTFIX (HTML only)
+    - Fix: Team Insights "Export .doc" threw "statusColors is not defined" -- the map was block-scoped to the Reports render; export now has its own local copy
+
+  v2.0.70 (2026-06-23) -- BATCH 3: visibility + calibration baseline + branding
+    - Auditor hidden from view-role agents (Review filter, list column, ticket detail header); visible to edit/full
+    - Calibration baseline (global, manual): Set/Clear buttons store an ISO date in Config; runCalibration only analyzes disputes on/after it, so applied recommendations don't skew future runs
+    - New carbon-fiber Wingman logo + favicon (login + header), kills the /favicon.ico 404
+
+  v2.0.69 (2026-06-23) -- BATCH 2: dispute reliability + debug
+    - Chunked Notion writes (rtChunks) -- disputes, notes, justifications, transcript, history no longer truncate at ~1990 chars and silently corrupt/lose data
+    - Dispute saves now retry (notionPatchRetry) + read-back verify (verifyDisputesSaved) -- a failed save surfaces an error instead of silently dropping disputes
+    - Hardened optimistic updates: match by notionPageId||id so the editor sees changes instantly without "Sync Notion"
+    - Debug log buffer + global error capture + dbg() across dispute/save/login/batch; "Export debug log" button in Settings and exportWingmanLog() in console
+
   v2.0.68 (2026-06-19) -- HOTFIX (HTML only)
     - Fix: runQAOnFetched called setActiveTab (undefined) -- corrected to setView; batch QA no longer throws on completion
     - Fix: batch QA, batch-save, and replace paths now record the Notion page id on the local ticket
@@ -628,7 +642,35 @@ const { useState, useEffect, useRef, useCallback } = React;
 // The Python /proxy injects them server-side based on destination host.
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.68";
+const APP_VERSION = "v2.0.71";
+// ── Debug log buffer ─────────────────────────────────────────────────────────
+// Ring buffer of recent events + uncaught errors, so user-reported issues can be
+// traced. Export via the Settings tab button or exportWingmanLog() in the console.
+window.__WM_LOG = window.__WM_LOG || [];
+function dbg(tag, msg, data){
+  try{
+    var line = { t:new Date().toISOString(), tag:tag, msg:String(msg) };
+    if(data!==undefined){ try{ line.data = JSON.parse(JSON.stringify(data)); }catch(e){ line.data = String(data); } }
+    window.__WM_LOG.push(line);
+    if(window.__WM_LOG.length>500) window.__WM_LOG.shift();
+    console.log("["+tag+"] "+msg, data!==undefined?data:"");
+  }catch(e){}
+}
+window.exportWingmanLog = function(){
+  try{
+    var blob = new Blob([ "Wingman "+APP_VERSION+" debug log\n"+JSON.stringify(window.__WM_LOG,null,2) ], {type:"text/plain"});
+    var a=document.createElement("a"); a.href=URL.createObjectURL(blob);
+    a.download="wingman-debug-"+new Date().toISOString().slice(0,19).replace(/[:T]/g,"-")+".txt";
+    document.body.appendChild(a); a.click(); a.remove();
+  }catch(e){ console.error("export failed",e); }
+};
+window.addEventListener("error", function(ev){ dbg("uncaught", (ev.message||"error")+" @ "+(ev.filename||"")+":"+(ev.lineno||"")); });
+window.addEventListener("unhandledrejection", function(ev){ dbg("unhandled", (ev.reason&&ev.reason.message)||String(ev.reason)); });
+// ── Brand logo (carbon-fiber wing mark) ──────────────────────────────────────
+const WINGMAN_LOGO = "data:image/jpeg;base64,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";
+(function(){ try{ ["icon","apple-touch-icon"].forEach(function(rel){
+  var l=document.createElement("link"); l.rel=rel; l.href=WINGMAN_LOGO; document.head.appendChild(l);
+}); }catch(e){} })();
 const REPORTS_DB_ID = "3684e96c994180db8929c67f306c554a";
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
@@ -703,7 +745,7 @@ async function proxyFetch(targetUrl, method, headers, body) {
 }
 
 async function notionAPI(path, method, body) {
-  // No auth header from client — server attaches the Notion token.
+  // No auth header from client -- server attaches the Notion token.
   return proxyFetch("https://api.notion.com" + path, method || "GET", null, body);
 }
 
@@ -876,8 +918,42 @@ async function saveConfigToNotion(dbId, key, value) {
   }
 }
 
+// Split a long string into Notion rich_text chunks (<=1900 chars each, up to 100).
+// getProp() rejoins all fragments on read -> write-only, backward-compatible fix for
+// fields that previously truncated at ~1990 chars (disputes, notes, transcript, etc).
+function rtChunks(s){
+  var str = String(s==null?"":s);
+  if(str.length<=1900) return [{ text:{ content: str } }];
+  var out=[];
+  for(var i=0;i<str.length && out.length<100;i+=1900){ out.push({ text:{ content: str.slice(i,i+1900) } }); }
+  return out;
+}
+// PATCH a Notion page with up to 3 attempts on transient failure.
+async function notionPatchRetry(pageId, properties, maxRetries){
+  maxRetries = maxRetries==null?2:maxRetries;
+  var lastErr;
+  for(var attempt=0;attempt<=maxRetries;attempt++){
+    try{ return await notionAPI("/v1/pages/"+pageId,"PATCH",{properties:properties}); }
+    catch(e){ lastErr=e; dbg("notion","patch attempt "+(attempt+1)+" failed: "+e.message);
+      if(attempt<maxRetries) await new Promise(function(r){setTimeout(r,700*(attempt+1));}); }
+  }
+  throw lastErr;
+}
+// Read-back verify that a disputes object actually persisted (guards against silent loss).
+async function verifyDisputesSaved(pageId, expectedCount){
+  try{
+    var page = await notionAPI("/v1/pages/"+pageId,"GET");
+    var saved = getProp(page,"Disputes JSON");
+    var parsed = tryParseJSON(saved);
+    var got = parsed?Object.keys(parsed).length:0;
+    dbg("dispute","read-back pageId="+pageId+" got="+got+" expected="+expectedCount);
+    if(got!==expectedCount) throw new Error("read-back mismatch: saved "+got+" of "+expectedCount+" disputes");
+    return true;
+  }catch(e){ dbg("dispute","read-back error: "+e.message); throw e; }
+}
+
 async function saveTicketToNotion(dbId, ticket) {
-  const rt = (s) => [{ text: { content: String(s||"").slice(0,1900) } }];
+  const rt = (s) => rtChunks(s);  // chunked: no truncation
   const props = {
     "Ticket ID":          { title: rt(ticket.ticketId) },
     "Agent":              { rich_text: rt(ticket.agentName||"") },
@@ -895,8 +971,8 @@ async function saveTicketToNotion(dbId, ticket) {
     "Reviewed By":        { rich_text: rt(ticket.reviewedBy||"") },
     "Reviewed At":        { rich_text: rt(ticket.reviewedAt||"") },
     "Autofail":           { checkbox: !!ticket.autofail },
-    "Scores JSON":        { rich_text: rt(JSON.stringify(ticket.aiScores||ticket.scores||{}).slice(0,1900)) },
-    "Disputes JSON":      { rich_text: rt(JSON.stringify(ticket.disputes||{}).slice(0,1900)) },
+    "Scores JSON":        { rich_text: rt(JSON.stringify(ticket.aiScores||ticket.scores||{})) },
+    "Disputes JSON":      { rich_text: rt(JSON.stringify(ticket.disputes||{})) },
     "Justifications JSON":{ rich_text: rt((function(){
       var cj={};
       Object.entries(ticket.justifications||{}).forEach(function(e){
@@ -907,7 +983,7 @@ async function saveTicketToNotion(dbId, ticket) {
           if(v.improve&&v.improve!=="null")cj[k].i=String(v.improve).slice(0,100);
         }
       });
-      return JSON.stringify(cj).slice(0,1900);
+      return JSON.stringify(cj);
     })()) },
     // Per-category notes -- full text, no truncation
     "CTF Notes":       { rich_text: rt(formatNotes(ticket.justifications,"ctf")) },
@@ -918,14 +994,14 @@ async function saveTicketToNotion(dbId, ticket) {
     "Returns Notes":   { rich_text: rt(formatNotes(ticket.justifications,"returns")) },
     "Promo Notes":     { rich_text: rt(formatNotes(ticket.justifications,"promo")) },
     "Retention Notes": { rich_text: rt(formatNotes(ticket.justifications,"retention")) },
-    "Reviewer Notes":     { rich_text: rt((ticket.reviewerNotes||"").slice(0,1990)) },
-    "Comments":           { rich_text: rt((ticket.comments||"").slice(0,1900)) },
-    "Transcript":         { rich_text: rt((ticket.transcript||"").slice(0,1900)) },
-    "Autofails JSON":     { rich_text: rt(JSON.stringify(ticket.autofails||[]).slice(0,1900)) },
+    "Reviewer Notes":     { rich_text: rt((ticket.reviewerNotes||"")) },
+    "Comments":           { rich_text: rt((ticket.comments||"")) },
+    "Transcript":         { rich_text: rt((ticket.transcript||"")) },
+    "Autofails JSON":     { rich_text: rt(JSON.stringify(ticket.autofails||[])) },
     "Saved At":           { rich_text: rt(new Date().toISOString()) },
     "Audit Type":         { rich_text: rt(ticket.auditType||"AI Batch") },
     "Message Count":      { number: ticket.messageCount||ticket.message_count||0 },
-    "Reaudit History":    { rich_text: rt(JSON.stringify(ticket.reauditHistory||[]).slice(0,1990)) },
+    "Reaudit History":    { rich_text: rt(JSON.stringify(ticket.reauditHistory||[])) },
   };
   if (ticket.ticketUrl) props["Ticket URL"] = { url: ticket.ticketUrl };
   const data = await notionAPI("/v1/pages", "POST", { parent: { database_id: dbId }, properties: props });
@@ -937,7 +1013,7 @@ async function updateTicketInNotion(pageId, ticket) {
     "Final Score":   { number: ticket.finalScore||0 },
     "Final Passed":  { checkbox: !!(ticket.disputedPassed!==undefined?ticket.disputedPassed:ticket.passed) },
     "Has Disputes":  { checkbox: !!ticket.hasDisputes },
-    "Disputes JSON": { rich_text: [{ text: { content: JSON.stringify(ticket.disputes||{}).slice(0,1900) } }] },
+    "Disputes JSON": { rich_text: rtChunks(JSON.stringify(ticket.disputes||{})) },
     "Saved At":      { rich_text: [{ text: { content: new Date().toISOString() } }] },
   };
   await notionAPI(`/v1/pages/${pageId}`, "PATCH", { properties: props });
@@ -1445,6 +1521,7 @@ function App() {
   // Calibration tab
   const [calibrationRunning,setCalibrationRunning]=useState(false);
   const [calibrationResult,setCalibrationResult]=useState(null);
+  const [calibrationBaseline,setCalibrationBaseline]=useState(""); // ISO date; only disputes on/after are analyzed
   // #2 Agent edit
   const [editingAgent,setEditingAgent]=useState(false);
   const [agentEditValue,setAgentEditValue]=useState("");
@@ -1550,6 +1627,7 @@ function App() {
     var session=await verifySession(token);
     if(session){
       var em=session.email.toLowerCase().trim();
+      dbg("login","session valid for "+em+" — loading users");
 
       // Session is server-valid — store the token now so the proxy calls made
       // during login (e.g. loadUsersFromNotion) authenticate. Removed below if
@@ -2080,7 +2158,7 @@ function App() {
           "Deleted":      {checkbox:true},
           "Deleted By":   {rich_text:[{text:{content:currentUser.name}}]},
           "Deleted At":   {rich_text:[{text:{content:now}}]},
-          "Delete Reason":{rich_text:[{text:{content:(reason||"Deleted by "+currentUser.role+" user").slice(0,1990)}}]},
+          "Delete Reason":{rich_text:rtChunks(reason||"Deleted by "+currentUser.role+" user")},
         }});
       }
       setTickets(function(ts){return ts.filter(function(t){return t.notionPageId!==ticket.notionPageId;});});
@@ -2108,7 +2186,7 @@ function App() {
           "Reviewed":       {checkbox:true},
           "Reviewed By":    {rich_text:[{text:{content:currentUser.name}}]},
           "Reviewed At":    {rich_text:[{text:{content:updated.reviewedAt}}]},
-          "Reviewer Notes": {rich_text:[{text:{content:notes.slice(0,1990)}}]},
+          "Reviewer Notes": {rich_text:rtChunks(notes)},
         }});
       }
       setReviewedTickets(function(r){return Object.assign({},r,{[ticket.id||ticket.ticketId]:true});});
@@ -2251,6 +2329,7 @@ function App() {
           if(savedA && savedA.id){ newResult.notionPageId = savedA.id; newResult.id = savedA.id; }
           setTickets(function(prev){return prev.concat([newResult]);});
         } catch(saveErr) {
+          dbg("batch","save FAILED for #"+ticket.ticketId+": "+saveErr.message);
           console.error("Save failed for",ticket.ticketId,saveErr);
           newResult._saveError=saveErr.message;
         }
@@ -2725,6 +2804,7 @@ function App() {
   function downloadInsightsDoc() {
     if(!aiInsights) { addToast("No insights to export","error"); return; }
     var ins = aiInsights;
+    var statusColors={needs_attention:{bg:"#fee2e2",border:"#ef4444",text:"#991b1b",label:"NEEDS ATTENTION"},on_track:{bg:"#fffbeb",border:"#f59e0b",text:"#92400e",label:"ON TRACK"},strong:{bg:"#f0fdf4",border:"#22c55e",text:"#166534",label:"STRONG"},critical:{bg:"#fee2e2",border:"#ef4444",text:"#991b1b",label:"CRITICAL"}};
     var sc = statusColors[ins.status]||statusColors.on_track;
     var filtered2 = tickets.filter(function(t){return t.finalScore>0;});
     var teamAvg = filtered2.length ? Math.round(filtered2.reduce(function(s,t){return s+t.finalScore;},0)/filtered2.length) : 0;
@@ -3200,13 +3280,13 @@ Rules:
       }
       history[catId].push({by:currentUser.name,at:now,content:noteEditValue.trim()});
       if(history[catId].length>5) history[catId]=history[catId].slice(-5);
-      var historyStr = JSON.stringify(history).slice(0,1990);
+      var historyStr = JSON.stringify(history);
       var improveVal = noteImproveValue.trim()||null;
       var formattedNote = noteEditValue.trim();
       if(improveVal) formattedNote += " | \u2191 " + improveVal;
       var patch = {};
-      patch[notionField] = {rich_text:[{text:{content:formattedNote.slice(0,1990)}}]};
-      patch["Notes History JSON"] = {rich_text:[{text:{content:historyStr}}]};
+      patch[notionField] = {rich_text:rtChunks(formattedNote)};
+      patch["Notes History JSON"] = {rich_text:rtChunks(historyStr)};
       var currentJustJSON = ticket.justificationsJSON||"{}";
       var justObj = {};
       try { justObj = JSON.parse(currentJustJSON); } catch(e) {
@@ -3216,7 +3296,7 @@ Rules:
       justObj[catId].reason = noteEditValue.trim();
       justObj[catId].improve = improveVal;
       justObj[catId].edited = true;
-      patch["Justifications JSON"] = {rich_text:[{text:{content:JSON.stringify(justObj).slice(0,1990)}}]};
+      patch["Justifications JSON"] = {rich_text:rtChunks(JSON.stringify(justObj))};
       await notionAPI("/v1/pages/"+ticket.notionPageId,"PATCH",{properties:patch});
       setTickets(function(ts){return ts.map(function(t){
         if(t.notionPageId!==ticket.notionPageId) return t;
@@ -3250,10 +3330,10 @@ Rules:
       }
       history["comments"].push({by:currentUser.name,at:now,content:commentsEditValue.trim()});
       if(history["comments"].length>5) history["comments"]=history["comments"].slice(-5);
-      var historyStr = JSON.stringify(history).slice(0,1990);
+      var historyStr = JSON.stringify(history);
       await notionAPI("/v1/pages/"+ticket.notionPageId,"PATCH",{properties:{
-        "Comments":{rich_text:[{text:{content:commentsEditValue.trim().slice(0,1990)}}]},
-        "Notes History JSON":{rich_text:[{text:{content:historyStr}}]}
+        "Comments":{rich_text:rtChunks(commentsEditValue.trim())},
+        "Notes History JSON":{rich_text:rtChunks(historyStr)}
       }});
       setTickets(function(ts){return ts.map(function(t){return t.notionPageId===ticket.notionPageId?Object.assign({},t,{comments:commentsEditValue.trim(),commentsEdited:true,notesHistoryJSON:historyStr}):t;});});
       setReviewSelected(function(r){return r&&r.notionPageId===ticket.notionPageId?Object.assign({},r,{comments:commentsEditValue.trim(),commentsEdited:true,notesHistoryJSON:historyStr}):r;});
@@ -3274,7 +3354,7 @@ Rules:
       await notionAPI("/v1/pages/"+ticket.notionPageId,"PATCH",{properties:{
         "Autofail":       {checkbox: true},
         "Autofails JSON": {rich_text:[{text:{content:JSON.stringify([condition])}}]},
-        "Reviewer Notes": {rich_text:[{text:{content:("AUTOFAIL: "+autofailReason).slice(0,1990)}}]}
+        "Reviewer Notes": {rich_text:rtChunks("AUTOFAIL: "+autofailReason)}
       }});
       var updated = Object.assign({},ticket,{autofail:true,autofails:[condition]});
       setTickets(function(ts){return ts.map(function(t){return t.notionPageId===ticket.notionPageId?updated:t;});});
@@ -3295,7 +3375,7 @@ Rules:
       await notionAPI("/v1/pages/"+ticket.notionPageId,"PATCH",{properties:{
         "Autofail":       {checkbox: false},
         "Autofails JSON": {rich_text:[{text:{content:"[]"}}]},
-        "Reviewer Notes": {rich_text:[{text:{content:("AUTOFAIL REMOVED: "+reason.trim()+" — "+currentUser.name+" "+now.slice(0,10)).slice(0,1990)}}]}
+        "Reviewer Notes": {rich_text:rtChunks("AUTOFAIL REMOVED: "+reason.trim()+" -- "+currentUser.name+" "+now.slice(0,10))}
       }});
       var updated = Object.assign({},ticket,{autofail:false,autofails:[]});
       setTickets(function(ts){return ts.map(function(t){return t.notionPageId===ticket.notionPageId?updated:t;});});
@@ -3347,10 +3427,10 @@ Rules:
       var history = [];
       try { history = JSON.parse(historyRaw); } catch(e){}
       history.push({by:currentUser.name,at:now,reason:reason.trim()});
-      var historyStr = JSON.stringify(history).slice(0,1990);
+      var historyStr = JSON.stringify(history);
       await notionAPI("/v1/pages/"+ticket.notionPageId,"PATCH",{properties:{
         "Reviewed":{checkbox:false},
-        "Reopen History JSON":{rich_text:[{text:{content:historyStr}}]}
+        "Reopen History JSON":{rich_text:rtChunks(historyStr)}
       }});
       setTickets(function(ts){return ts.map(function(t){return t.notionPageId===ticket.notionPageId?Object.assign({},t,{reviewed:false,reopenHistoryJSON:historyStr}):t;});});
       setReviewSelected(function(r){return r&&r.notionPageId===ticket.notionPageId?Object.assign({},r,{reviewed:false,reopenHistoryJSON:historyStr}):r;});
@@ -3877,7 +3957,7 @@ Rules:
 
   // ── CALIBRATION ───────────────────────────────────────────────────────────────
   async function runCalibration() {
-    var disputed=tickets.filter(function(t){return t.hasDisputes||(t.disputes&&Object.keys(t.disputes).length>0);});
+    var disputed=tickets.filter(function(t){var hd=t.hasDisputes||(t.disputes&&Object.keys(t.disputes).length>0);if(!hd)return false;if(calibrationBaseline){var ts=t.reviewedAt||t.savedAt||"";if(ts<calibrationBaseline)return false;}return true;});
     if(disputed.length<10){addToast("Need at least 10 disputed tickets for calibration (currently "+disputed.length+")","error");return;}
     setCalibrationRunning(true); setCalibrationResult(null);
     try {
@@ -4048,6 +4128,8 @@ Rules:
       if(savedAutofails && Array.isArray(savedAutofails)) setAutofailList(savedAutofails);
       var savedScoringContext = await loadConfigFromNotion(setup.configDbId, "scoringContext");
       if(savedScoringContext && typeof savedScoringContext === "string") setScoringContext(savedScoringContext);
+      var savedBaseline = await loadConfigFromNotion(setup.configDbId, "calibrationBaseline");
+      if(savedBaseline && typeof savedBaseline === "string") setCalibrationBaseline(savedBaseline);
       setSyncStatus("");
       if (Array.isArray(t) && t.length > 0) {
         addToast("Loaded " + t.length + " tickets");
@@ -4121,15 +4203,16 @@ Rules:
         }
       });
       var hasDisputes=Object.keys(updatedDisputes).length>0;
-      var disputesStr=JSON.stringify(updatedDisputes).slice(0,1990);
+      dbg("dispute","submit "+Object.keys(updatedDisputes).length+" dispute(s) pageId="+reviewSelected.notionPageId);
       if(reviewSelected.notionPageId){
-        await notionAPI("/v1/pages/"+reviewSelected.notionPageId,"PATCH",{properties:{
-          "Disputes JSON":{rich_text:[{text:{content:disputesStr}}]},
+        await notionPatchRetry(reviewSelected.notionPageId,{
+          "Disputes JSON":{rich_text:rtChunks(JSON.stringify(updatedDisputes))},
           "Has Disputes":  {checkbox:hasDisputes},
-        }});
+        });
+        await verifyDisputesSaved(reviewSelected.notionPageId,Object.keys(updatedDisputes).length);
       }
       var updated=Object.assign({},reviewSelected,{disputes:updatedDisputes,hasDisputes});
-      setTickets(function(ts){return ts.map(function(t){return t.id===updated.id?updated:t;});});
+      setTickets(function(ts){return ts.map(function(t){return ((t.notionPageId&&t.notionPageId===updated.notionPageId)||t.id===updated.id)?updated:t;});});
       setReviewSelected(updated);
       setDisputeState({});
       addToast("Dispute submitted — pending auditor review");
@@ -4171,23 +4254,24 @@ Rules:
       });
       var dispSc=calcScore(merged,matrix);
       var hasDisputes=Object.values(updatedDisputes).some(function(d){return d.status==="approved";});
-      var disputesStr=JSON.stringify(updatedDisputes).slice(0,1990);
       var updated=Object.assign({},reviewSelected,{
         disputes:updatedDisputes,hasDisputes,
         finalScore:dispSc?dispSc.pct:reviewSelected.finalScore,
         reviewed:true,reviewedBy:currentUser.name,reviewedAt:now,
       });
+      dbg("dispute","approval save pageId="+reviewSelected.notionPageId+" approvedKeys="+Object.keys(updatedDisputes).length);
       if(reviewSelected.notionPageId){
         await updateTicketInNotion(reviewSelected.notionPageId,updated);
-        await notionAPI("/v1/pages/"+reviewSelected.notionPageId,"PATCH",{properties:{
-          "Disputes JSON":{rich_text:[{text:{content:disputesStr}}]},
+        await notionPatchRetry(reviewSelected.notionPageId,{
+          "Disputes JSON":{rich_text:rtChunks(JSON.stringify(updatedDisputes))},
           "Has Disputes":  {checkbox:hasDisputes},
           "Reviewed":      {checkbox:true},
-          "Reviewed By":   {rich_text:[{text:{content:currentUser.name}}]},
-          "Reviewed At":   {rich_text:[{text:{content:now}}]},
-        }});
+          "Reviewed By":   {rich_text:rtChunks(currentUser.name)},
+          "Reviewed At":   {rich_text:rtChunks(now)},
+        });
+        await verifyDisputesSaved(reviewSelected.notionPageId,Object.keys(updatedDisputes).length);
       }
-      setTickets(function(ts){return ts.map(function(t){return t.id===updated.id?updated:t;});});
+      setTickets(function(ts){return ts.map(function(t){return ((t.notionPageId&&t.notionPageId===updated.notionPageId)||t.id===updated.id)?updated:t;});});
       setReviewSelected(updated);
       setApprovalState({});
       addToast("Dispute decisions saved");
@@ -4227,17 +4311,19 @@ Rules:
         reviewedAt:new Date().toISOString(),
         reviewerNotes:reviewerNotes,
       });
+      dbg("dispute","save "+pending.length+" change(s) pageId="+updated.notionPageId);
       if(updated.notionPageId){
         await updateTicketInNotion(updated.notionPageId,updated);
         // Also save reviewed status and reviewer notes
-        await notionAPI("/v1/pages/"+updated.notionPageId,"PATCH",{properties:{
+        await notionPatchRetry(updated.notionPageId,{
           "Reviewed":       {checkbox:true},
-          "Reviewed By":    {rich_text:[{text:{content:currentUser.name}}]},
-          "Reviewed At":    {rich_text:[{text:{content:updated.reviewedAt}}]},
-          "Reviewer Notes": {rich_text:[{text:{content:reviewerNotes.slice(0,1990)}}]},
-        }});
+          "Reviewed By":    {rich_text:rtChunks(currentUser.name)},
+          "Reviewed At":    {rich_text:rtChunks(updated.reviewedAt)},
+          "Reviewer Notes": {rich_text:rtChunks(reviewerNotes)},
+        });
+        await verifyDisputesSaved(updated.notionPageId,Object.keys(updatedDisputes).length);
       }
-      setTickets(function(ts){return ts.map(function(t){return t.id===updated.id?updated:t;});});
+      setTickets(function(ts){return ts.map(function(t){return ((t.notionPageId&&t.notionPageId===updated.notionPageId)||t.id===updated.id)?updated:t;});});
       setReviewSelected(updated);
       setDisputeState({});
       addToast(pending.length+" dispute"+(pending.length!==1?"s":"")+" saved");
@@ -4308,19 +4394,7 @@ Rules:
         <div style={{background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-lg)",padding:"2.5rem 2rem",width:"100%",maxWidth:"400px"}}>
           <div style={{marginBottom:"2rem",textAlign:"center"}}>
             <div style={{display:"flex",justifyContent:"center",marginBottom:"12px"}}>
-              <svg width="56" height="56" viewBox="0 0 160 160" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <rect width="160" height="160" rx="28" fill="#0D1B3E"/>
-                <g fill="white">
-                  {/* Left wing */}
-                  <path d="M80 72 C72 60, 52 44, 22 38 C34 46, 44 52, 52 60 C44 54, 30 50, 18 52 C30 58, 42 62, 52 68 C44 65, 32 64, 22 68 C34 70, 46 72, 56 76 L80 76 Z"/>
-                  {/* Right wing */}
-                  <path d="M80 72 C88 60, 108 44, 138 38 C126 46, 116 52, 108 60 C116 54, 130 50, 142 52 C130 58, 118 62, 108 68 C116 65, 128 64, 138 68 C126 70, 114 72, 104 76 L80 76 Z"/>
-                  {/* Stem */}
-                  <rect x="78" y="76" width="4" height="32" rx="2"/>
-                  {/* Dot */}
-                  <circle cx="80" cy="114" r="6"/>
-                </g>
-              </svg>
+              <img src={WINGMAN_LOGO} width="56" height="56" style={{borderRadius:"10px",display:"block"}} alt="Wingman"/>
             </div>
             <h2 style={{fontSize:"22px",fontWeight:500,margin:"0 0 2px",color:"var(--color-text-primary)",letterSpacing:"-0.3px"}}>Wingman</h2>
             <p style={{fontSize:"12px",color:"var(--color-text-secondary)",margin:"0 0 4px",fontWeight:500,textTransform:"uppercase",letterSpacing:"0.06em"}}>By Freebird CX</p>
@@ -4378,15 +4452,7 @@ Rules:
         <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:"8px"}}>
           <div>
             <div style={{display:"flex",alignItems:"center",gap:"10px"}}>
-              <svg width="28" height="28" viewBox="0 0 160 160" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <rect width="160" height="160" rx="28" fill="#0D1B3E"/>
-                <g fill="white">
-                  <path d="M80 72 C72 60, 52 44, 22 38 C34 46, 44 52, 52 60 C44 54, 30 50, 18 52 C30 58, 42 62, 52 68 C44 65, 32 64, 22 68 C34 70, 46 72, 56 76 L80 76 Z"/>
-                  <path d="M80 72 C88 60, 108 44, 138 38 C126 46, 116 52, 108 60 C116 54, 130 50, 142 52 C130 58, 118 62, 108 68 C116 65, 128 64, 138 68 C126 70, 114 72, 104 76 L80 76 Z"/>
-                  <rect x="78" y="76" width="4" height="32" rx="2"/>
-                  <circle cx="80" cy="114" r="6"/>
-                </g>
-              </svg>
+              <img src={WINGMAN_LOGO} width="28" height="28" style={{borderRadius:"6px",display:"block"}} alt="Wingman"/>
               <div>
                 <h2 style={{fontSize:"17px",fontWeight:500,margin:0,color:"var(--color-text-primary)",letterSpacing:"-0.2px"}}>Wingman</h2>
                 <span style={{fontSize:"10px",color:"var(--color-text-secondary)",fontWeight:500,textTransform:"uppercase",letterSpacing:"0.06em"}}>By Freebird CX</span>
@@ -4641,6 +4707,7 @@ Rules:
                       {[...new Set(tickets.map(function(t){return t.agentName;}).filter(Boolean))].sort().map(function(a){return <option key={a} value={a}>{a}</option>;})}
                     </select>
                   </div>
+                  {isEditor&&(
                   <div>
                     <label style={lbl}>Auditor</label>
                     <select style={{fontSize:"13px",padding:"5px 8px"}} value={reviewFilters.auditor} onChange={function(e){setReviewFilters(function(f){return Object.assign({},f,{auditor:e.target.value});});}}>
@@ -4648,6 +4715,7 @@ Rules:
                       {effectiveUsers.filter(function(u){return u.role==="full"||u.role==="edit";}).slice().sort(function(a,b){return a.name.localeCompare(b.name);}).map(function(u){return <option key={u.email} value={u.name}>{u.name}</option>;})}
                     </select>
                   </div>
+                  )}
                   <label style={{display:"flex",alignItems:"center",gap:"6px",fontSize:"13px",cursor:"pointer",paddingBottom:"2px"}}>
                     <input type="checkbox" checked={reviewFilters.disputedOnly} onChange={function(e){setReviewFilters(function(f){return Object.assign({},f,{disputedOnly:e.target.checked});});}}/>
                     Disputed only
@@ -4685,8 +4753,8 @@ Rules:
                 return (
                   <div style={card}>
                     <p style={{margin:"0 0 10px",fontWeight:500,fontSize:"14px"}}>{filtered.length} tickets</p>
-                    <div style={{display:"grid",gridTemplateColumns:"100px 1fr 1fr 80px 80px 80px 80px 80px",gap:"6px",padding:"5px 8px",marginBottom:"4px"}}>
-                      {["Ticket","Agent","Subject","Auditor","AI","Final","Status","Review"].map(function(h){return <span key={h} style={{fontSize:"11px",color:"var(--color-text-secondary)"}}>{h}</span>;})}
+                    <div style={{display:"grid",gridTemplateColumns:(isEditor?"100px 1fr 1fr 80px 80px 80px 80px 80px":"100px 1fr 1fr 80px 80px 80px 80px"),gap:"6px",padding:"5px 8px",marginBottom:"4px"}}>
+                      {(isEditor?["Ticket","Agent","Subject","Auditor","AI","Final","Status","Review"]:["Ticket","Agent","Subject","AI","Final","Status","Review"]).map(function(h){return <span key={h} style={{fontSize:"11px",color:"var(--color-text-secondary)"}}>{h}</span>;})}
                     </div>
                     {filtered.map(function(t){
                       var dispSc=calcDisputedScore(t,matrix);
@@ -4696,12 +4764,12 @@ Rules:
                       var isReviewed=reviewedTickets[t.id||t.ticketId]||t.reviewed||t.hasDisputes||(t.disputes&&Object.keys(t.disputes).length>0);
                       var hasDisputes=t.hasDisputes||(t.disputes&&Object.keys(t.disputes).length>0);
                       return(
-                        <div key={t.id} className="qa-row" style={{display:"grid",gridTemplateColumns:"100px 1fr 1fr 80px 80px 80px 80px 80px",gap:"6px",padding:"8px",borderRadius:"var(--border-radius-md)",marginBottom:"2px",cursor:"pointer",alignItems:"center",background:isReviewed?"var(--color-background-secondary)":"transparent"}}
+                        <div key={t.id} className="qa-row" style={{display:"grid",gridTemplateColumns:(isEditor?"100px 1fr 1fr 80px 80px 80px 80px 80px":"100px 1fr 1fr 80px 80px 80px 80px"),gap:"6px",padding:"8px",borderRadius:"var(--border-radius-md)",marginBottom:"2px",cursor:"pointer",alignItems:"center",background:isReviewed?"var(--color-background-secondary)":"transparent"}}
                           onClick={function(){setReviewSelected(t);setDisputeState({});}}>
                           <span style={{fontSize:"12px",fontWeight:500,color:"var(--color-text-info)"}}>{t.ticketId}</span>
                           <span style={{fontSize:"12px",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.agentName}</span>
                           <span style={{fontSize:"12px",color:"var(--color-text-secondary)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.contactReason||"—"}</span>
-                          <span style={{fontSize:"11px",color:"var(--color-text-secondary)"}}>{t.reviewer}</span>
+                          {isEditor&&<span style={{fontSize:"11px",color:"var(--color-text-secondary)"}}>{t.reviewer}</span>}
                           <span style={{fontSize:"12px",fontWeight:600,color:aiTone.text}}>{t.aiScore||t.finalScore}%</span>
                           <span style={{fontSize:"12px",fontWeight:600,color:dispTone.text}}>{dispSc?dispSc.pct:(t.aiScore||t.finalScore)}%</span>
                           <div style={{display:"flex",gap:"4px",flexWrap:"wrap"}}>
@@ -4782,7 +4850,7 @@ Rules:
               {/* Ticket info bar */}
               <div style={{...card,marginBottom:"12px"}}>
                 <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(140px,1fr))",gap:"10px",marginBottom:"12px"}}>
-                  {[["Ticket",reviewSelected.ticketId],["Auditor",reviewSelected.reviewer],["Week",reviewSelected.week],["Contact reason",reviewSelected.contactReason]].map(function(p){
+                  {[["Ticket",reviewSelected.ticketId],["Auditor",reviewSelected.reviewer],["Week",reviewSelected.week],["Contact reason",reviewSelected.contactReason]].filter(function(p){return isEditor||p[0]!=="Auditor";}).map(function(p){
                     return <div key={p[0]}><span style={{fontSize:"11px",color:"var(--color-text-secondary)",display:"block",marginBottom:"2px"}}>{p[0]}</span><span style={{fontSize:"13px",fontWeight:500}}>{p[1]||"—"}</span></div>;
                   })}
                   <div>
@@ -6339,13 +6407,29 @@ Rules:
       {view==="calibration"&&isFullAccess&&(
         <div>
           <div style={{...card,marginBottom:"16px"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:"8px"}}>
+              <div style={{flex:1,minWidth:"240px"}}>
+                <p style={{margin:"0 0 4px",fontSize:"13px",fontWeight:600}}>Calibration baseline</p>
+                <p style={{margin:0,fontSize:"12px",color:"var(--color-text-secondary)",lineHeight:"1.5"}}>
+                  {calibrationBaseline
+                    ? ("Analyzing disputes recorded on or after "+new Date(calibrationBaseline).toLocaleDateString()+". After you apply rubric or prompt changes, set this to now so the next run isn't skewed by tickets scored under the old rubric.")
+                    : "No baseline set — analyzing all disputed tickets in history. After applying changes from a calibration, set a baseline so the next run only considers tickets scored under the updated rubric."}
+                </p>
+              </div>
+              <div style={{display:"flex",gap:"8px"}}>
+                <button onClick={async function(){var iso=new Date().toISOString();try{await saveConfigToNotion((notionSetup&&notionSetup.configDbId)||CONFIG_DB_ID,"calibrationBaseline",iso);setCalibrationBaseline(iso);dbg("calibration","baseline set "+iso);addToast("Calibration baseline set to now");}catch(e){addToast("Failed to set baseline: "+e.message,"error");}}} style={{...btnInfo,fontSize:"12px"}}>Set baseline to now</button>
+                {calibrationBaseline&&<button onClick={async function(){try{await saveConfigToNotion((notionSetup&&notionSetup.configDbId)||CONFIG_DB_ID,"calibrationBaseline","");setCalibrationBaseline("");dbg("calibration","baseline cleared");addToast("Calibration baseline cleared");}catch(e){addToast("Failed to clear baseline: "+e.message,"error");}}} style={{...ghost,fontSize:"12px"}}>Clear</button>}
+              </div>
+            </div>
+          </div>
+          <div style={{...card,marginBottom:"16px"}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"10px",flexWrap:"wrap",gap:"8px"}}>
               <div>
                 <p style={{margin:"0 0 4px",fontSize:"15px",fontWeight:600}}>AI Calibration Analysis</p>
                 <p style={{margin:0,fontSize:"12px",color:"var(--color-text-secondary)"}}>Analyzes disputed tickets to surface patterns and recommend rubric or prompt improvements.</p>
               </div>
               {(function(){
-                var disputed=tickets.filter(function(t){return t.hasDisputes||(t.disputes&&Object.keys(t.disputes).length>0);});
+                var disputed=tickets.filter(function(t){var hd=t.hasDisputes||(t.disputes&&Object.keys(t.disputes).length>0);if(!hd)return false;if(calibrationBaseline){var ts=t.reviewedAt||t.savedAt||"";if(ts<calibrationBaseline)return false;}return true;});
                 var tooFew=disputed.length<10;
                 return(
                   <div style={{textAlign:"right"}}>
@@ -6361,7 +6445,7 @@ Rules:
               })()}
             </div>
             {(function(){
-              var disputed=tickets.filter(function(t){return t.hasDisputes||(t.disputes&&Object.keys(t.disputes).length>0);});
+              var disputed=tickets.filter(function(t){var hd=t.hasDisputes||(t.disputes&&Object.keys(t.disputes).length>0);if(!hd)return false;if(calibrationBaseline){var ts=t.reviewedAt||t.savedAt||"";if(ts<calibrationBaseline)return false;}return true;});
               if(disputed.length<10) return(
                 <div style={{padding:"12px 14px",background:"var(--color-background-warning)",border:"0.5px solid var(--color-border-warning)",borderRadius:"var(--border-radius-md)",fontSize:"12px",color:"var(--color-text-warning)"}}>
                   ⚠ Not enough disputed tickets yet. At least 10 are needed for meaningful pattern analysis. Currently {disputed.length} available.
@@ -6619,6 +6703,10 @@ Rules:
                       <p style={{margin:"0 0 4px",fontSize:"13px",fontWeight:600}}>Data Integrity</p>
                       <p style={{margin:"0 0 12px",fontSize:"12px",color:"var(--color-text-secondary)"}}>Recalculate Final Passed for all tickets based on current Final Score. Fixes pass/fail flags that are out of sync after disputes.</p>
                       <button onClick={recalcFinalPassed} style={{...btnInfo,fontSize:"12px"}}>Recalculate Final Passed</button>
+                      <div style={{marginTop:"20px",paddingTop:"16px",borderTop:"0.5px solid var(--color-border-tertiary)"}}>
+                        <p style={{margin:"0 0 12px",fontSize:"12px",color:"var(--color-text-secondary)"}}>Export a debug log of recent activity and errors. Attach this when reporting an issue so it can be traced.</p>
+                        <button onClick={function(){window.exportWingmanLog();addToast("Debug log exported");}} style={{...ghost,fontSize:"12px"}}>Export debug log</button>
+                      </div>
                     </div>
                   )}
 
