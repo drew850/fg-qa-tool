@@ -6,6 +6,14 @@
   Date:     2026-06-09
 
   Changelog:
+  v2.0.78 (2026-06-25) -- Balance Audits
+    - New "Balance Audits" button on the Fetch tab: for a target N and a chosen week, counts each selected agent's existing audits that week and pulls (N - existing) new, un-audited, non-deleted tickets per agent. Scope = Agents multi-select (or all known agents if none selected).
+    - Added a Week picker to the date section (used only by Balance Audits). Respects current Fetch filters; newest-first; excludes tickets already audited that week.
+    - Output reuses the normal Fetch results + Save CSV / Run QA / Both buttons, plus a per-agent breakdown (had / pulled / now / short).
+
+  v2.0.77 (2026-06-25) -- Review: weeks dropdown sorted latest-first
+    - Week labels ("Jun 9 - Jun 15 2026") sorted as strings (month name first, year last) so order was alphabetical, not chronological. Now sorted by parsed start date, latest first (weekSortKey helper).
+
   v2.0.76 (2026-06-25) -- Fetch debug logging
     - Per-ticket console logging during fetch: each ticket# logs PASS (with its status/channel/CR/agent/msg count) or SKIP with the exact filter it violated and the offending value. For troubleshooting fetch results against manual Gorgias exports.
     - Tag "[FetchDbg]"; disable with window.__FETCH_DEBUG = false in the console.
@@ -659,7 +667,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 // The Python /proxy injects them server-side based on destination host.
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.76";
+const APP_VERSION = "v2.0.78";
 // ── Debug log buffer ─────────────────────────────────────────────────────────
 // Ring buffer of recent events + uncaught errors, so user-reported issues can be
 // traced. Export via the Settings tab button or exportWingmanLog() in the console.
@@ -1287,6 +1295,35 @@ function ticketWeekLabel(createdDate) {
   return fmt(start) + " - " + fmt(end) + " " + d.getFullYear();
 }
 
+// Parse a week label ("Jun 9 - Jun 15 2026") into a sortable timestamp (start of week).
+// Used to sort week dropdowns chronologically, since the label sorts wrong as a string.
+function weekSortKey(label) {
+  if (!label) return 0;
+  try {
+    const m = String(label).match(/^(.*?)\s*-\s*.*\s(\d{4})$/);
+    if (m) { const d = new Date(m[1].trim() + " " + m[2]); if (!isNaN(d.getTime())) return d.getTime(); }
+  } catch (e) {}
+  return 0;
+}
+
+// Build the Mon-Sun week label ("Jun 9 - Jun 15 2026") from a Monday Date.
+function weekLabelFromMonday(mon){
+  var end=new Date(mon); end.setDate(mon.getDate()+6);
+  var fmt=function(d){return d.toLocaleDateString("en-US",{month:"short",day:"numeric"});};
+  return fmt(mon)+" - "+fmt(end)+" "+mon.getFullYear();
+}
+// Last n weeks (Mondays), newest first: [{value:"YYYY-MM-DD"(Mon), label:"Jun 9 - Jun 15 2026"}].
+function recentWeeks(n){
+  var out=[]; var today=new Date(); var day=today.getDay()||7;
+  var mon0=new Date(today); mon0.setDate(today.getDate()-day+1); mon0.setHours(0,0,0,0);
+  for(var i=0;i<n;i++){
+    var m=new Date(mon0); m.setDate(mon0.getDate()-7*i);
+    var val=m.getFullYear()+"-"+String(m.getMonth()+1).padStart(2,"0")+"-"+String(m.getDate()).padStart(2,"0");
+    out.push({value:val,label:weekLabelFromMonday(m)});
+  }
+  return out;
+}
+
 // ── CSV PARSER ───────────────────────────────────────────────────────────
 function parseCSV(text) {
   const lines = text.split(/\r?\n/).filter(l => l.trim());
@@ -1561,12 +1598,15 @@ function App() {
     crL1:allTrue(CR_L1_OPTS),crL2:allTrue(CR_L2_OPTS),prodL1:"",resL1:"",resL2:"",addResL1:"",addResL2:"",
     msgMin:"",msgMax:"",
     ticketsPerAgent:"",maxTickets:"500",skipHours:"24",
-    keyword:""
+    keyword:"",
+    balanceTarget:"",
+    balanceWeek:(function(){var t=new Date();var day=t.getDay()||7;var m=new Date(t);m.setDate(t.getDate()-day+1);return m.getFullYear()+"-"+String(m.getMonth()+1).padStart(2,"0")+"-"+String(m.getDate()).padStart(2,"0");})()
   });
   const [fetchLoading,setFetchLoading]=useState(false);
   const fetchCancelRef=useRef(false);
   const [fetchSummary,setFetchSummary]=useState(null);
   const [fetchStatus,setFetchStatus]=useState("");
+  const [balanceReport,setBalanceReport]=useState(null);
   const [fetchedTickets,setFetchedTickets]=useState([]);
   const [fetchError,setFetchError]=useState("");
   const [showAdvancedFetch,setShowAdvancedFetch]=useState(false);
@@ -3713,14 +3753,48 @@ Rules:
     return [val, "N/A"];
   }
 
-  async function fetchGorgiasTickets() {
+  async function fetchGorgiasTickets(opts) {
     setFetchLoading(true); setFetchError(""); setFetchedTickets([]); setFetchSummary(null);
+    setBalanceReport(null);
     fetchCancelRef.current = false;
     var f = fetchForm;
+    var balance = !!(opts && opts.balance);
+    var balanceTarget = balance ? (parseInt(f.balanceTarget||"")||0) : 0;
+    var agentDeficits = {};       // {agentLower: number still to pull}
+    var balanceExisting = {};     // {agentLower: existing audits this week}
+    var auditedThisWeek = new Set();
+    var balanceWeekLabel = "";
+    var balanceScopeNames = [];
     try {
       // Build date params
       var since = null, until = null;
-      if(f.dateMode==="range" && f.fromDate) {
+      if(balance) {
+        if(!balanceTarget || balanceTarget < 1) { setFetchError("Enter a target number of audits per agent."); setFetchLoading(false); return; }
+        if(!f.balanceWeek) { setFetchError("Pick a week for Balance Audits."); setFetchLoading(false); return; }
+        var bMon = new Date(f.balanceWeek+"T00:00:00");
+        var bSun = new Date(bMon); bSun.setDate(bMon.getDate()+6);
+        var pad2 = function(x){return String(x).padStart(2,"0");};
+        since = f.balanceWeek+"T00:00:00";
+        until = bSun.getFullYear()+"-"+pad2(bSun.getMonth()+1)+"-"+pad2(bSun.getDate())+"T23:59:59";
+        balanceWeekLabel = weekLabelFromMonday(bMon);
+        balanceScopeNames = Object.entries(f.selectedAgents||{}).filter(function(e){return e[1];}).map(function(e){return e[0];});
+        if(!balanceScopeNames.length) balanceScopeNames = [...new Set(tickets.map(function(t){return t.agentName;}).filter(Boolean))];
+        balanceScopeNames.forEach(function(nm){ balanceExisting[nm.toLowerCase()] = 0; });
+        tickets.forEach(function(t){
+          if(t.week===balanceWeekLabel){
+            if(t.ticketId) auditedThisWeek.add(String(t.ticketId));
+            var k=(t.agentName||"").toLowerCase();
+            if(k in balanceExisting) balanceExisting[k]++;
+          }
+        });
+        balanceScopeNames.forEach(function(nm){
+          var k=nm.toLowerCase();
+          var deficit = Math.max(0, balanceTarget - (balanceExisting[k]||0));
+          if(deficit>0) agentDeficits[k]=deficit;
+        });
+        console.log("[Balance] Week:", balanceWeekLabel, "| target:", balanceTarget, "| deficits:", agentDeficits, "| already audited this week:", auditedThisWeek.size);
+        if(!Object.keys(agentDeficits).length) { setFetchError("All selected agents already have "+balanceTarget+"+ audits for "+balanceWeekLabel+"."); setFetchLoading(false); return; }
+      } else if(f.dateMode==="range" && f.fromDate) {
         since = f.fromDate+"T00:00:00";
         until = f.toDate ? f.toDate+"T23:59:59" : null;
         console.log("[QA][filter] Date range:", since, "→", until||"no end");
@@ -3737,6 +3811,8 @@ Rules:
 
       var cursor = null;
       var maxTickets = parseInt(f.maxTickets||500) || 500;
+      var totalDeficit = Object.values(agentDeficits).reduce(function(a,b){return a+b;},0);
+      if(balance) maxTickets = totalDeficit || maxTickets;
       var skipHrs = parseInt(f.skipHours||"0") || 0;
       var cutoffSkip = skipHrs > 0 ? new Date(Date.now() - skipHrs*60*60*1000).toISOString().slice(0,19) : null;
       if(cutoffSkip) console.log("[QA][fetch] Skipping tickets closed within last "+skipHrs+"h, cutoff:", cutoffSkip);
@@ -3746,7 +3822,7 @@ Rules:
         scanned:0, raw:0, skippedStatus:0, skippedRecentlyClosed:0,
         skippedChannel:0, skippedAgentFilter:0,
         skippedCR:0, skippedRes:0, skippedMsgCount:0, skippedKeyword:0,
-        skippedAgentCap:0, skippedDeleted:0, skippedMsgFetch:0, rateLimited:false, result:0
+        skippedAgentCap:0, skippedDeleted:0, skippedMsgFetch:0, skippedAlreadyAudited:0, rateLimited:false, result:0
       };
 
       var channels = Object.entries(f.channels).filter(function(e){return e[1];}).map(function(e){return e[0];});
@@ -3847,6 +3923,13 @@ Rules:
             fc.skippedAgentFilter++; fdbg(tid,"SKIP agent: '"+agentName+"' not in selected agents"); continue;
           }
 
+          if(balance) {
+            var bak = (agentName||"").toLowerCase();
+            if(!agentDeficits[bak]) { fc.skippedAgentFilter++; fdbg(tid,"SKIP balance: "+(agentName||"(no agent)")+" not in scope / already at target"); continue; }
+            if(auditedThisWeek.has(String(tid))) { fc.skippedAlreadyAudited++; fdbg(tid,"SKIP balance: already audited this week"); continue; }
+            if((agentCounts[agentName]||0) >= agentDeficits[bak]) { fc.skippedAgentCap++; fdbg(tid,"SKIP balance: "+agentName+" deficit met"); continue; }
+          }
+
           var crParts     = parseTicketField(t, FIELD_CR);
           var prodParts   = parseTicketField(t, FIELD_PROD);
           var resParts    = parseTicketField(t, FIELD_RES);
@@ -3862,7 +3945,7 @@ Rules:
 
           if(deletedTicketIds.has(String(tid))) { fc.skippedDeleted++; fdbg(tid,"SKIP previously-deleted"); continue; }
 
-          if(perAgent && agentName && (agentCounts[agentName]||0) >= perAgent) { fc.skippedAgentCap++; fdbg(tid,"SKIP agent-cap: "+agentName+" already at "+perAgent); continue; }
+          if(!balance && perAgent && agentName && (agentCounts[agentName]||0) >= perAgent) { fc.skippedAgentCap++; fdbg(tid,"SKIP agent-cap: "+agentName+" already at "+perAgent); continue; }
 
           // All cheap filters passed — update live counter before expensive message fetch
           setFetchStatus("Searched "+fc.raw+" \u00b7 Matched "+results.length+(maxTickets?" / "+maxTickets:""));
@@ -3933,7 +4016,7 @@ Rules:
           fdbg(tid,"PASS  status="+(t.status||"")+" channel="+((t.channel||t.via||t.initial_channel||"").toLowerCase())+" crL1="+crParts[0]+" crL2="+crParts[1]+" agent="+agentName+" msgs="+msgCount);
           fc.result++;
 
-          if(perAgent && agentName) {
+          if((perAgent || balance) && agentName) {
             agentCounts[agentName] = (agentCounts[agentName]||0) + 1;
           }
 
@@ -3956,7 +4039,18 @@ Rules:
       setFetchSummary(Object.assign({},fc));
       console.log("[QA][summary]", fc);
       setFetchedTickets(results);
-      if(fc.rateLimited){
+      if(balance){
+        var pulledByAgent={}; Object.keys(agentCounts).forEach(function(a){ pulledByAgent[a.toLowerCase()]=agentCounts[a]; });
+        var brows = balanceScopeNames.map(function(nm){
+          var k=nm.toLowerCase(); var had=balanceExisting[k]||0; var pulled=pulledByAgent[k]||0; var tot=had+pulled;
+          return { agent:nm, had:had, pulled:pulled, total:tot, short:Math.max(0,balanceTarget-tot) };
+        }).sort(function(a,b){ return b.short-a.short || b.pulled-a.pulled; });
+        setBalanceReport({ week:balanceWeekLabel, target:balanceTarget, rows:brows, rateLimited:fc.rateLimited });
+        console.log("[Balance] Result for "+balanceWeekLabel+":", brows);
+        var anyShort = brows.some(function(r){return r.short>0;});
+        setFetchStatus("Balance complete for "+balanceWeekLabel+" — pulled "+results.length+" ticket(s)."+(fc.rateLimited?" Rate-limited, may be incomplete.":(anyShort?" Some agents short of target (see breakdown).":" All selected agents now at "+balanceTarget+".")));
+        if(fc.rateLimited) addToast("Gorgias rate-limited the balance run — results may be incomplete","error");
+      } else if(fc.rateLimited){
         setFetchStatus("Done — "+results.length+" fetched, but Gorgias rate-limited this run so it may be INCOMPLETE. Narrow the date range or run again in a minute.");
         addToast("Gorgias rate-limited the fetch — results may be incomplete","error");
       } else {
@@ -4809,7 +4903,7 @@ Rules:
                     <label style={lbl}>Week</label>
                     <select style={{fontSize:"13px",padding:"5px 8px"}} value={reviewFilters.week} onChange={function(e){setReviewFilters(function(f){return Object.assign({},f,{week:e.target.value});});}}>
                       <option value="">All weeks (ticket date)</option>
-                      {[...new Set(tickets.map(function(t){return t.week;}).filter(Boolean))].sort().reverse().map(function(w){return <option key={w} value={w}>{w}</option>;})}
+                      {[...new Set(tickets.map(function(t){return t.week;}).filter(Boolean))].sort(function(a,b){return weekSortKey(b)-weekSortKey(a);}).map(function(w){return <option key={w} value={w}>{w}</option>;})}
                     </select>
                   </div>
                   <div>
@@ -5461,6 +5555,14 @@ Rules:
                   </div>
                 </div>
               )}
+              {/* Week picker — used only by Balance Audits */}
+              <div style={{marginTop:"12px",maxWidth:"240px"}}>
+                <label style={{...lbl,marginBottom:"4px"}}>Week <span style={{fontWeight:400,textTransform:"none",letterSpacing:0,color:"var(--color-text-secondary)"}}>(Balance Audits only)</span></label>
+                <select value={fetchForm.balanceWeek} onChange={function(e){setFetchForm(function(ff){return Object.assign({},ff,{balanceWeek:e.target.value});});}}
+                  style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}>
+                  {recentWeeks(16).map(function(w){return <option key={w.value} value={w.value}>{w.label}</option>;})}
+                </select>
+              </div>
             </div>
 
             {/* Ticket Status multi-select */}
@@ -5655,11 +5757,22 @@ Rules:
               </div>
             )}
 
-            <div style={{display:"flex",gap:"10px",alignItems:"center"}}>
-              <button onClick={fetchGorgiasTickets} disabled={fetchLoading}
+            <div style={{display:"flex",gap:"10px",alignItems:"center",flexWrap:"wrap"}}>
+              <button onClick={function(){fetchGorgiasTickets();}} disabled={fetchLoading}
                 style={{...btnSuccess,padding:"10px 28px",fontSize:"13px",opacity:fetchLoading?0.6:1}}>
                 {fetchLoading?"Fetching...":"Pull Tickets"}
               </button>
+              <div style={{display:"flex",alignItems:"center",gap:"6px",paddingLeft:"10px",borderLeft:"0.5px solid var(--color-border-tertiary)"}}>
+                <span style={{fontSize:"12px",color:"var(--color-text-secondary)"}}>Target / agent</span>
+                <input type="number" min="1" value={fetchForm.balanceTarget} placeholder="6"
+                  onChange={function(e){setFetchForm(function(ff){return Object.assign({},ff,{balanceTarget:e.target.value});});}}
+                  style={{width:"64px",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+                <button onClick={function(){fetchGorgiasTickets({balance:true});}} disabled={fetchLoading}
+                  style={{...btnInfo,padding:"10px 18px",fontSize:"13px",opacity:fetchLoading?0.6:1}}
+                  title="Pull enough new tickets per selected agent to reach the target for the chosen week">
+                  {fetchLoading?"Working...":"Balance Audits"}
+                </button>
+              </div>
               {fetchLoading&&(
                 <button onClick={function(){fetchCancelRef.current=true;}}
                   style={{...ghost,padding:"10px 18px",fontSize:"13px",color:"var(--color-text-danger)",borderColor:"var(--color-border-danger)"}}>
@@ -5668,6 +5781,27 @@ Rules:
               )}
             </div>
           </div>
+
+          {balanceReport&&(
+            <div style={card}>
+              <p style={{...sectionLabel,margin:"0 0 8px"}}>Balance Audits — {balanceReport.week} (target {balanceReport.target} per agent)</p>
+              <div style={{display:"grid",gridTemplateColumns:"1fr auto auto auto auto",gap:"4px 16px",fontSize:"12px",alignItems:"center"}}>
+                <span style={{fontWeight:700,color:"var(--color-text-secondary)"}}>Agent</span>
+                <span style={{fontWeight:700,color:"var(--color-text-secondary)",textAlign:"right"}}>Had</span>
+                <span style={{fontWeight:700,color:"var(--color-text-secondary)",textAlign:"right"}}>Pulled</span>
+                <span style={{fontWeight:700,color:"var(--color-text-secondary)",textAlign:"right"}}>Now</span>
+                <span style={{fontWeight:700,color:"var(--color-text-secondary)",textAlign:"right"}}>Short</span>
+                {balanceReport.rows.map(function(r){return <React.Fragment key={r.agent}>
+                  <span>{r.agent}</span>
+                  <span style={{textAlign:"right"}}>{r.had}</span>
+                  <span style={{textAlign:"right"}}>{r.pulled}</span>
+                  <span style={{textAlign:"right"}}>{r.total}</span>
+                  <span style={{textAlign:"right",color:r.short>0?"var(--color-text-warning)":"var(--color-text-secondary)"}}>{r.short>0?r.short:"—"}</span>
+                </React.Fragment>;})}
+              </div>
+              <p style={{margin:"10px 0 0",fontSize:"11px",color:"var(--color-text-secondary)"}}>The pulled tickets are below. Run QA (or CSV + Run QA) to score and save them — that's what brings each agent up to target in the database.{balanceReport.rateLimited?" Note: this run was rate-limited by Gorgias and may be incomplete.":""}</p>
+            </div>
+          )}
 
           {/* Preview table */}
           {fetchedTickets.length>0&&(
