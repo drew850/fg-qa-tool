@@ -6,6 +6,9 @@
   Date:     2026-06-09
 
   Changelog:
+  v2.0.74 (2026-06-25) -- HOTFIX: Delete & Replace rate-limit resilience
+    - The per-candidate message fetch in findReplacementTicket had no 429 handling: a rate-limited candidate was silently treated as "too few messages" and skipped, cascading into more calls and the rate-limit messaging users saw (or a false "no replacement found"). Added 429 retry/backoff (5s->40s, 4 attempts), matching the page-fetch loop.
+
   v2.0.73 (2026-06-25) -- RECOVERY: v2.0.71 (full) + Gorgias fetch rate-limit fix
     - Rebuilt from the complete v2.0.71 (all of Batch 1/2/3 intact); the .72 build had been applied to a stale base and dropped the batches.
     - Gorgias fetch: page-listing 429 now backs off + retries the same page instead of silently ending the run (was reporting a false "0 results").
@@ -647,7 +650,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 // The Python /proxy injects them server-side based on destination host.
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.73";
+const APP_VERSION = "v2.0.74";
 // ── Debug log buffer ─────────────────────────────────────────────────────────
 // Ring buffer of recent events + uncaught errors, so user-reported issues can be
 // traced. Export via the Settings tab button or exportWingmanLog() in the console.
@@ -1855,7 +1858,19 @@ function App() {
         // Fetch message count
         console.log("[Replace][2] Checking msgs for #"+t.id+"...");
         try {
-          var msgResp = await gorgiasAPI("/tickets/"+t.id+"/messages", {limit:100});
+          var msgResp = null;
+          for(var ma=0; ma<4; ma++) {
+            var mr = await gorgiasAPI("/tickets/"+t.id+"/messages", {limit:100});
+            if(mr && mr._status === 429) {
+              var mwait = [5000,10000,20000,40000][ma];
+              console.log("[Replace][2] msg 429 for #"+t.id+" — pausing "+(mwait/1000)+"s (attempt "+(ma+1)+"/4)");
+              setDeleteModal(function(d){return Object.assign({},d,{_status:"Rate limited by Gorgias — pausing "+(mwait/1000)+"s..."});});
+              await new Promise(function(r){setTimeout(r,mwait);});
+              continue;
+            }
+            msgResp = mr; break;
+          }
+          if(!msgResp) { console.log("[Replace][2] #"+t.id+" — still rate-limited after retries, skipping"); await new Promise(function(r){setTimeout(r,500);}); continue; }
           var msgs = msgResp.data||[];
           var msgCount = msgs.length;
           console.log("[Replace][2] #"+t.id+" — "+msgCount+" msgs (min: "+minMsg+")");
