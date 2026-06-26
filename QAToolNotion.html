@@ -6,6 +6,11 @@
   Date:     2026-06-09
 
   Changelog:
+  v2.0.75 (2026-06-25) -- Fetch tab cleanup: multi-select filters
+    - Ticket status, Channel, Contact Reason L1, and Contact Reason L2 are now multi-select dropdowns (checkbox lists with All/Clear), default all-selected = no filter.
+    - Status options: closed, open. Channel + CR taxonomies expanded to the full Gorgias value sets. CR L1/L2 changed from free-text to predefined multi-select.
+    - Filters now match against any of the selected values; "All" selected applies no filter. Channel match also checks initial_channel.
+
   v2.0.74 (2026-06-25) -- HOTFIX: Delete & Replace rate-limit resilience
     - The per-candidate message fetch in findReplacementTicket had no 429 handling: a rate-limited candidate was silently treated as "too few messages" and skipped, cascading into more calls and the rate-limit messaging users saw (or a false "no replacement found"). Added 429 retry/backoff (5s->40s, 4 attempts), matching the page-fetch loop.
 
@@ -650,7 +655,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 // The Python /proxy injects them server-side based on destination host.
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.74";
+const APP_VERSION = "v2.0.75";
 // ── Debug log buffer ─────────────────────────────────────────────────────────
 // Ring buffer of recent events + uncaught errors, so user-reported issues can be
 // traced. Export via the Settings tab button or exportWingmanLog() in the console.
@@ -1431,6 +1436,56 @@ var sectionLabel = { fontSize: "11px", fontWeight: 700, textTransform: "uppercas
 
 const NAV_TABS = [["fetch", "Fetch Tickets"], ["batch", "Batch QA"], ["manual", "Manual Audit"], ["dashboard", "Dashboard"], ["review", "Review"], ["myreports", "My Reports"], ["reports", "Reports"], ["matrix", "Matrix"], ["calibration", "Calibration"]];
 
+const STATUS_OPTS = ["closed","open"];
+const CHANNEL_OPTS = ["api","chat","contact_form","email","facebook","facebook-messenger","help-center","instagram-ad-comment","instagram-comment","instagram-direct-message","sms"];
+const CR_L1_OPTS = ["Cancel","Order Issue","Order Status","Other","Subscription","Troubleshooting","Update Order"];
+const CR_L2_OPTS = ["Add / Remove / Change Item","Broken Blade / Attachment","Cancel 1st Product Order","Change Address","Change Frequency","Change Product","CX Wrong Item / Order","Delays, but Not Lost","Delivered, Not Received","FB Wrong Item / Order","General Order Question","General Product Question","Influencer/Job Inquiry","International (Delays, but Not Lost)","International (No Delays)","Lost in Transit","Missing Item From Kit","Missing Item From Order","Multi-Channel Duplicate","Negative Feedback","Never Shipped","Never worked (new device)","No Delays","Other","Package Damaged / Damaged Upon Arrival","Payment/Charge Issues","Positive Feedback","Promo Request/Issue","Received Unsatisfactory Product","Received Used Product","Return Follow Through","Return Request","Returned to Sender","Skip Order","Social General/Tagging","Stopped Working","Subscription (Aware)","Subscription (Unaware)","Subscription Order","System Notification","Update Account","Will Not Charge","Won't turn OFF","Wrong Address"];
+function allTrue(arr){ var o={}; arr.forEach(function(k){ o[k]=true; }); return o; }
+
+// Reusable checkbox multi-select dropdown for the Fetch tab. Driven by a {value:true} map;
+// "All" selected means no filter. Defined at module scope so its open state survives re-renders.
+function FetchMultiSelect(props){
+  var label=props.label, options=props.options||[], selected=props.selected||{}, onChange=props.onChange;
+  var format=props.format||function(x){return x;};
+  var sref=React.useRef(null);
+  var os=React.useState(false), open=os[0], setOpen=os[1];
+  React.useEffect(function(){
+    if(!open) return;
+    function onDoc(e){ if(sref.current && !sref.current.contains(e.target)) setOpen(false); }
+    document.addEventListener("mousedown", onDoc);
+    return function(){ document.removeEventListener("mousedown", onDoc); };
+  },[open]);
+  var chosen=options.filter(function(o){return selected[o];});
+  var total=options.length, n=chosen.length;
+  var summary = n===0 ? "None" : (n===total ? "All" : (n===1 ? format(chosen[0]) : n+" selected"));
+  function setAll(v){ var m={}; if(v){ options.forEach(function(o){ m[o]=true; }); } onChange(m); }
+  function toggle(o){ var m=Object.assign({},selected); if(m[o]){ delete m[o]; } else { m[o]=true; } onChange(m); }
+  return (
+    <div style={{position:"relative"}} ref={sref}>
+      <label style={{...lbl,marginBottom:"4px"}}>{label}</label>
+      <button onClick={function(){ setOpen(function(v){return !v;}); }}
+        style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",background:"var(--color-background-primary)",textAlign:"left",cursor:"pointer",color:"var(--color-text-primary)",display:"flex",justifyContent:"space-between",alignItems:"center",gap:"6px"}}>
+        <span style={{overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{summary}</span>
+        <span style={{fontSize:"10px",color:"var(--color-text-secondary)"}}>{open?"\u25be":"\u25b8"}</span>
+      </button>
+      {open&&(
+        <div style={{position:"absolute",top:"100%",left:0,right:0,zIndex:200,minWidth:"220px",background:"var(--color-background-primary)",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",boxShadow:"0 4px 12px rgba(0,0,0,0.15)",maxHeight:"280px",overflowY:"auto",marginTop:"2px"}}>
+          <div style={{padding:"6px 8px",borderBottom:"0.5px solid var(--color-border-tertiary)",display:"flex",gap:"8px",position:"sticky",top:0,background:"var(--color-background-primary)"}}>
+            <button onClick={function(){ setAll(true); }} style={{fontSize:"11px",padding:"2px 8px",background:"none",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",cursor:"pointer",color:"var(--color-text-secondary)"}}>All</button>
+            <button onClick={function(){ setAll(false); }} style={{fontSize:"11px",padding:"2px 8px",background:"none",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",cursor:"pointer",color:"var(--color-text-secondary)"}}>Clear</button>
+          </div>
+          {options.map(function(o){
+            return <label key={o} style={{display:"flex",alignItems:"center",gap:"8px",padding:"6px 10px",cursor:"pointer",fontSize:"12px",borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
+              <input type="checkbox" checked={!!selected[o]} onChange={function(){ toggle(o); }}/>
+              <span style={{wordBreak:"break-word"}}>{format(o)}</span>
+            </label>;
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function App() {
   // ── ALL HOOKS FIRST (React rules of hooks - no hooks after conditional returns) ──
   const [currentUser,setCurrentUser]=useState(null);
@@ -1495,11 +1550,11 @@ function App() {
   const [fetchForm,setFetchForm]=useState({
     dateMode:"lastN",
     fromDate:"",toDate:"",lastDays:"7",
-    status:{closed:true,open:true,pending:true},
-    channels:{email:false,chat:false,sms:false,voice:false,api:false},
+    status:allTrue(STATUS_OPTS),
+    channels:allTrue(CHANNEL_OPTS),
     agentFilter:"Has agent assigned",
     selectedAgents:{},
-    crL1:"",crL2:"",prodL1:"",resL1:"",resL2:"",addResL1:"",addResL2:"",
+    crL1:allTrue(CR_L1_OPTS),crL2:allTrue(CR_L2_OPTS),prodL1:"",resL1:"",resL2:"",addResL1:"",addResL2:"",
     msgMin:"",msgMax:"",
     ticketsPerAgent:"",maxTickets:"500",skipHours:"24",
     keyword:""
@@ -3673,7 +3728,7 @@ Rules:
 
       // Active status filters
       var activeStatuses = Object.entries(f.status||{}).filter(function(e){return e[1];}).map(function(e){return e[0];});
-      var filterByStatus = activeStatuses.length > 0 && activeStatuses.length < 3;
+      var filterByStatus = activeStatuses.length > 0 && activeStatuses.length < Object.keys(f.status||{}).length;
       console.log("[QA][filter] Status filter:", filterByStatus ? activeStatuses.join(", ") : "all statuses");
 
       var cursor = null;
@@ -3692,6 +3747,9 @@ Rules:
 
       var channels = Object.entries(f.channels).filter(function(e){return e[1];}).map(function(e){return e[0];});
       var selectedAgentNames = Object.entries(f.selectedAgents||{}).filter(function(e){return e[1];}).map(function(e){return e[0].toLowerCase();});
+      var channelFilterActive = channels.length > 0 && channels.length < Object.keys(f.channels||{}).length;
+      var crL1All = Object.keys(f.crL1||{}); var crL1Sel = crL1All.filter(function(k){return f.crL1[k];}).map(function(s){return s.toLowerCase();}); var crL1Active = crL1Sel.length > 0 && crL1Sel.length < crL1All.length;
+      var crL2All = Object.keys(f.crL2||{}); var crL2Sel = crL2All.filter(function(k){return f.crL2[k];}).map(function(s){return s.toLowerCase();}); var crL2Active = crL2Sel.length > 0 && crL2Sel.length < crL2All.length;
       var FIELD_CR=9969, FIELD_PROD=5807, FIELD_RES=11375, FIELD_ADDRES=11421;
 
       console.log("[QA][fetch] Date filter (client-side) \u2014 start:", since, "end:", until||"none");
@@ -3765,8 +3823,8 @@ Rules:
             if(closedAt && closedAt > cutoffSkip) { fc.skippedRecentlyClosed++; continue; }
           }
 
-          if(channels.length) {
-            if(!channels.includes((t.channel||t.via||"").toLowerCase())) { fc.skippedChannel++; continue; }
+          if(channelFilterActive) {
+            if(!channels.includes((t.channel||t.via||t.initial_channel||"").toLowerCase())) { fc.skippedChannel++; continue; }
           }
 
           if(f.agentFilter==="Has agent assigned" && !t.assignee_user) { fc.skippedAgentFilter++; continue; }
@@ -3787,8 +3845,8 @@ Rules:
           var resParts    = parseTicketField(t, FIELD_RES);
           var addResParts = parseTicketField(t, FIELD_ADDRES);
 
-          if(f.crL1 && crParts[0].toLowerCase() !== f.crL1.toLowerCase()) { fc.skippedCR++; continue; }
-          if(f.crL2 && f.crL2.trim() && crParts[1].toLowerCase() !== f.crL2.trim().toLowerCase()) { fc.skippedCR++; continue; }
+          if(crL1Active && !crL1Sel.includes(crParts[0].toLowerCase())) { fc.skippedCR++; continue; }
+          if(crL2Active && !crL2Sel.includes(crParts[1].toLowerCase())) { fc.skippedCR++; continue; }
           if(f.prodL1 && prodParts[0].toLowerCase() !== f.prodL1.toLowerCase()) { fc.skippedCR++; continue; }
           if(f.resL1 && resParts[0].toLowerCase() !== f.resL1.toLowerCase()) { fc.skippedRes++; continue; }
           if(f.resL2 && f.resL2.trim() && resParts[1].toLowerCase() !== f.resL2.trim().toLowerCase()) { fc.skippedRes++; continue; }
@@ -5397,35 +5455,24 @@ Rules:
               )}
             </div>
 
-            {/* Ticket Status checkboxes */}
-            <div style={{marginBottom:"10px"}}>
-              <label style={{...lbl,marginBottom:"6px"}}>Ticket status <span style={{fontWeight:400,textTransform:"none",letterSpacing:0,color:"var(--color-text-secondary)"}}>— all checked = no filter</span></label>
-              <div style={{display:"flex",gap:"16px"}}>
-                {["closed","open","pending"].map(function(s){
-                  return <label key={s} style={{display:"flex",alignItems:"center",gap:"5px",fontSize:"12px",cursor:"pointer"}}>
-                    <input type="checkbox" checked={fetchForm.status[s]||false}
-                      onChange={function(e){var v=e.target.checked;setFetchForm(function(f){var st=Object.assign({},f.status);st[s]=v;return Object.assign({},f,{status:st});});}}/>
-                    {s.charAt(0).toUpperCase()+s.slice(1)}
-                  </label>;
-                })}
-              </div>
+            {/* Ticket Status multi-select */}
+            <div style={{marginBottom:"10px",maxWidth:"240px"}}>
+              <FetchMultiSelect label="Ticket status"
+                options={STATUS_OPTS}
+                format={function(s){return s.charAt(0).toUpperCase()+s.slice(1);}}
+                selected={fetchForm.status}
+                onChange={function(m){setFetchForm(function(f){return Object.assign({},f,{status:m});});}}/>
             </div>
 
             {/* Separator */}
             <div style={{borderTop:"0.5px solid var(--color-border-tertiary)",margin:"12px 0"}}/>
 
-            {/* Channel checkboxes */}
-            <div style={{marginBottom:"14px"}}>
-              <label style={{...lbl,marginBottom:"6px"}}>Channel <span style={{fontWeight:400,textTransform:"none",letterSpacing:0,color:"var(--color-text-secondary)"}}>— none = all</span></label>
-              <div style={{display:"flex",gap:"16px",flexWrap:"wrap"}}>
-                {["email","chat","sms","voice","api"].map(function(ch){
-                  return <label key={ch} style={{display:"flex",alignItems:"center",gap:"5px",fontSize:"12px",cursor:"pointer"}}>
-                    <input type="checkbox" checked={fetchForm.channels[ch]||false}
-                      onChange={function(e){var v=e.target.checked;setFetchForm(function(f){var c=Object.assign({},f.channels);c[ch]=v;return Object.assign({},f,{channels:c});});}}/> 
-                    {ch.charAt(0).toUpperCase()+ch.slice(1)}
-                  </label>;
-                })}
-              </div>
+            {/* Channel multi-select */}
+            <div style={{marginBottom:"14px",maxWidth:"240px"}}>
+              <FetchMultiSelect label="Channel"
+                options={CHANNEL_OPTS}
+                selected={fetchForm.channels}
+                onChange={function(m){setFetchForm(function(f){return Object.assign({},f,{channels:m});});}}/>
             </div>
 
             {/* Agent + CR + Limits */}
@@ -5470,22 +5517,16 @@ Rules:
                 )}
               </div>
               <div>
-                <label style={{...lbl,marginBottom:"4px"}}>Contact Reason L1</label>
-                <input type="text" list="crL1List" placeholder="e.g. Cancel" value={fetchForm.crL1}
-                  onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{crL1:e.target.value,crL2:""});});}}
-                  style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
-                <datalist id="crL1List">
-                  {(window.__CR_L1_OPTIONS||[]).map(function(o){return <option key={o} value={o}/>;})}
-                </datalist>
+                <FetchMultiSelect label="Contact Reason L1"
+                  options={CR_L1_OPTS}
+                  selected={fetchForm.crL1}
+                  onChange={function(m){setFetchForm(function(f){return Object.assign({},f,{crL1:m});});}}/>
               </div>
               <div>
-                <label style={{...lbl,marginBottom:"4px"}}>Contact Reason L2</label>
-                <input type="text" list="crL2List" placeholder="e.g. Subscription (Unaware)" value={fetchForm.crL2}
-                  onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{crL2:e.target.value});});}}
-                  style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
-                <datalist id="crL2List">
-                  {(window.__CR_L2_OPTIONS||{})[fetchForm.crL1]&&(window.__CR_L2_OPTIONS[fetchForm.crL1]||[]).map(function(o){return <option key={o} value={o}/>;})}
-                </datalist>
+                <FetchMultiSelect label="Contact Reason L2"
+                  options={CR_L2_OPTS}
+                  selected={fetchForm.crL2}
+                  onChange={function(m){setFetchForm(function(f){return Object.assign({},f,{crL2:m});});}}/>
               </div>
               <div>
                 <label style={{...lbl,marginBottom:"4px"}}>Tickets per agent</label>
