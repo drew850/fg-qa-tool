@@ -6,6 +6,10 @@
   Date:     2026-06-09
 
   Changelog:
+  v2.0.76 (2026-06-25) -- Fetch debug logging
+    - Per-ticket console logging during fetch: each ticket# logs PASS (with its status/channel/CR/agent/msg count) or SKIP with the exact filter it violated and the offending value. For troubleshooting fetch results against manual Gorgias exports.
+    - Tag "[FetchDbg]"; disable with window.__FETCH_DEBUG = false in the console.
+
   v2.0.75 (2026-06-25) -- Fetch tab cleanup: multi-select filters
     - Ticket status, Channel, Contact Reason L1, and Contact Reason L2 are now multi-select dropdowns (checkbox lists with All/Clear), default all-selected = no filter.
     - Status options: closed, open. Channel + CR taxonomies expanded to the full Gorgias value sets. CR L1/L2 changed from free-text to predefined multi-select.
@@ -655,7 +659,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 // The Python /proxy injects them server-side based on destination host.
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.75";
+const APP_VERSION = "v2.0.76";
 // ── Debug log buffer ─────────────────────────────────────────────────────────
 // Ring buffer of recent events + uncaught errors, so user-reported issues can be
 // traced. Export via the Settings tab button or exportWingmanLog() in the console.
@@ -3762,6 +3766,9 @@ Rules:
 
       setFetchStatus("Scanning for tickets in your date range...");
 
+      // Per-ticket fetch debug: logs each ticket# and PASS or the filter it violated.
+      // Disable with window.__FETCH_DEBUG = false in the console.
+      var fdbg = function(id, v){ if(window.__FETCH_DEBUG !== false) console.log("[FetchDbg] #"+id+" "+v); };
       var pageRetry = 0;
       while(!reachedCutoff) {
         if(fetchCancelRef.current) { setFetchStatus("Cancelled \u2014 "+results.length+" matched."); break; }
@@ -3810,25 +3817,25 @@ Rules:
             setFetchStatus("Scanning \u2014 skipping "+fc.scanned+" recent tickets to reach your date range...");
             continue;
           }
-          if(since && created && created < since) { reachedCutoff = true; break; }
+          if(since && created && created < since) { fdbg(tid,"STOP: created "+created+" older than range start "+since+" (cutoff reached)"); reachedCutoff = true; break; }
           fc.raw++;
 
           if(filterByStatus) {
             var tStatus = (t.status||"").toLowerCase();
-            if(!activeStatuses.includes(tStatus)) { fc.skippedStatus++; continue; }
+            if(!activeStatuses.includes(tStatus)) { fc.skippedStatus++; fdbg(tid,"SKIP status: '"+tStatus+"' not in ["+activeStatuses.join(",")+"]"); continue; }
           }
 
           if(cutoffSkip && t.closed_datetime) {
             var closedAt = (t.closed_datetime||"").slice(0,19);
-            if(closedAt && closedAt > cutoffSkip) { fc.skippedRecentlyClosed++; continue; }
+            if(closedAt && closedAt > cutoffSkip) { fc.skippedRecentlyClosed++; fdbg(tid,"SKIP recently-closed: closed "+closedAt); continue; }
           }
 
           if(channelFilterActive) {
-            if(!channels.includes((t.channel||t.via||t.initial_channel||"").toLowerCase())) { fc.skippedChannel++; continue; }
+            if(!channels.includes((t.channel||t.via||t.initial_channel||"").toLowerCase())) { fc.skippedChannel++; fdbg(tid,"SKIP channel: '"+((t.channel||t.via||t.initial_channel||"").toLowerCase())+"' not in selected"); continue; }
           }
 
-          if(f.agentFilter==="Has agent assigned" && !t.assignee_user) { fc.skippedAgentFilter++; continue; }
-          if(f.agentFilter==="No agent assigned" && t.assignee_user)   { fc.skippedAgentFilter++; continue; }
+          if(f.agentFilter==="Has agent assigned" && !t.assignee_user) { fc.skippedAgentFilter++; fdbg(tid,"SKIP agent: no agent assigned"); continue; }
+          if(f.agentFilter==="No agent assigned" && t.assignee_user)   { fc.skippedAgentFilter++; fdbg(tid,"SKIP agent: has agent (wanted unassigned)"); continue; }
 
           var agentName = "";
           if(t.assignee_user) {
@@ -3837,7 +3844,7 @@ Rules:
           }
 
           if(selectedAgentNames.length && agentName && !selectedAgentNames.includes(agentName.toLowerCase())) {
-            fc.skippedAgentFilter++; continue;
+            fc.skippedAgentFilter++; fdbg(tid,"SKIP agent: '"+agentName+"' not in selected agents"); continue;
           }
 
           var crParts     = parseTicketField(t, FIELD_CR);
@@ -3845,17 +3852,17 @@ Rules:
           var resParts    = parseTicketField(t, FIELD_RES);
           var addResParts = parseTicketField(t, FIELD_ADDRES);
 
-          if(crL1Active && !crL1Sel.includes(crParts[0].toLowerCase())) { fc.skippedCR++; continue; }
-          if(crL2Active && !crL2Sel.includes(crParts[1].toLowerCase())) { fc.skippedCR++; continue; }
-          if(f.prodL1 && prodParts[0].toLowerCase() !== f.prodL1.toLowerCase()) { fc.skippedCR++; continue; }
-          if(f.resL1 && resParts[0].toLowerCase() !== f.resL1.toLowerCase()) { fc.skippedRes++; continue; }
-          if(f.resL2 && f.resL2.trim() && resParts[1].toLowerCase() !== f.resL2.trim().toLowerCase()) { fc.skippedRes++; continue; }
-          if(f.addResL1 && addResParts[0].toLowerCase() !== f.addResL1.toLowerCase()) { fc.skippedRes++; continue; }
-          if(f.addResL2 && f.addResL2.trim() && addResParts[1].toLowerCase() !== f.addResL2.trim().toLowerCase()) { fc.skippedRes++; continue; }
+          if(crL1Active && !crL1Sel.includes(crParts[0].toLowerCase())) { fc.skippedCR++; fdbg(tid,"SKIP contact-reason-L1: '"+crParts[0]+"' not in selected"); continue; }
+          if(crL2Active && !crL2Sel.includes(crParts[1].toLowerCase())) { fc.skippedCR++; fdbg(tid,"SKIP contact-reason-L2: '"+crParts[1]+"' not in selected"); continue; }
+          if(f.prodL1 && prodParts[0].toLowerCase() !== f.prodL1.toLowerCase()) { fc.skippedCR++; fdbg(tid,"SKIP product-L1: '"+prodParts[0]+"' != '"+f.prodL1+"'"); continue; }
+          if(f.resL1 && resParts[0].toLowerCase() !== f.resL1.toLowerCase()) { fc.skippedRes++; fdbg(tid,"SKIP resolution-L1: '"+resParts[0]+"' != '"+f.resL1+"'"); continue; }
+          if(f.resL2 && f.resL2.trim() && resParts[1].toLowerCase() !== f.resL2.trim().toLowerCase()) { fc.skippedRes++; fdbg(tid,"SKIP resolution-L2: '"+resParts[1]+"' != '"+f.resL2+"'"); continue; }
+          if(f.addResL1 && addResParts[0].toLowerCase() !== f.addResL1.toLowerCase()) { fc.skippedRes++; fdbg(tid,"SKIP add-resolution-L1: '"+addResParts[0]+"' != '"+f.addResL1+"'"); continue; }
+          if(f.addResL2 && f.addResL2.trim() && addResParts[1].toLowerCase() !== f.addResL2.trim().toLowerCase()) { fc.skippedRes++; fdbg(tid,"SKIP add-resolution-L2: '"+addResParts[1]+"' != '"+f.addResL2+"'"); continue; }
 
-          if(deletedTicketIds.has(String(tid))) { fc.skippedDeleted++; continue; }
+          if(deletedTicketIds.has(String(tid))) { fc.skippedDeleted++; fdbg(tid,"SKIP previously-deleted"); continue; }
 
-          if(perAgent && agentName && (agentCounts[agentName]||0) >= perAgent) { fc.skippedAgentCap++; continue; }
+          if(perAgent && agentName && (agentCounts[agentName]||0) >= perAgent) { fc.skippedAgentCap++; fdbg(tid,"SKIP agent-cap: "+agentName+" already at "+perAgent); continue; }
 
           // All cheap filters passed — update live counter before expensive message fetch
           setFetchStatus("Searched "+fc.raw+" \u00b7 Matched "+results.length+(maxTickets?" / "+maxTickets:""));
@@ -3886,19 +3893,19 @@ Rules:
           }
           // Persistent rate limit/error: don't mislabel as "too few messages" -- flag run
           // incomplete and skip this ticket so it can be re-fetched on a clean run.
-          if(!msgFetchOk) { fc.rateLimited = true; fc.skippedMsgFetch++; continue; }
+          if(!msgFetchOk) { fc.rateLimited = true; fc.skippedMsgFetch++; fdbg(tid,"SKIP msg-fetch: rate-limited/failed (run incomplete)"); continue; }
           await new Promise(function(r){setTimeout(r,250);}); // pace to ease Gorgias rate limit
 
           var minMsg2 = parseInt(f.msgMin||"")||null;
           var maxMsg2 = parseInt(f.msgMax||"")||null;
-          if(minMsg2 && msgCount < minMsg2) { fc.skippedMsgCount++; await new Promise(function(r){setTimeout(r,500);}); continue; }
-          if(maxMsg2 && msgCount > maxMsg2) { fc.skippedMsgCount++; await new Promise(function(r){setTimeout(r,500);}); continue; }
+          if(minMsg2 && msgCount < minMsg2) { fc.skippedMsgCount++; fdbg(tid,"SKIP msg-count: "+msgCount+" < min "+minMsg2); await new Promise(function(r){setTimeout(r,500);}); continue; }
+          if(maxMsg2 && msgCount > maxMsg2) { fc.skippedMsgCount++; fdbg(tid,"SKIP msg-count: "+msgCount+" > max "+maxMsg2); await new Promise(function(r){setTimeout(r,500);}); continue; }
 
           if(f.keyword && f.keyword.trim()) {
             var haystack = (transcript + " " + (t.subject||"")).toLowerCase();
             var kwWords = f.keyword.trim().toLowerCase().split(/[\s,]+/).filter(function(w){return w.length>0;});
             var allMatch = kwWords.every(function(w){return haystack.includes(w);});
-            if(!allMatch) { fc.skippedKeyword++; await new Promise(function(r){setTimeout(r,500);}); continue; }
+            if(!allMatch) { fc.skippedKeyword++; fdbg(tid,"SKIP keyword: not all of ["+kwWords.join(",")+"] found"); await new Promise(function(r){setTimeout(r,500);}); continue; }
           }
 
           var customerEmail = (t.customer||{}).email || "";
@@ -3923,6 +3930,7 @@ Rules:
             message_count:            msgCount,
             transcript:               transcript,
           });
+          fdbg(tid,"PASS  status="+(t.status||"")+" channel="+((t.channel||t.via||t.initial_channel||"").toLowerCase())+" crL1="+crParts[0]+" crL2="+crParts[1]+" agent="+agentName+" msgs="+msgCount);
           fc.result++;
 
           if(perAgent && agentName) {
