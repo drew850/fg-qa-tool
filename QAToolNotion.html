@@ -6,6 +6,9 @@
   Date:     2026-06-09
 
   Changelog:
+  v2.0.79 (2026-06-25) -- Fetch/Balance: even auditor assignment on Run QA
+    - Fetch -> Run QA (incl. Balance Audits -> Run QA) now auto-assigns reviewers round-robin across Full+Edit users, so each auditor gets the same number of tickets as much as possible (counts differ by at most 1). Previously only the CSV-upload-into-Batch-QA path did this; the Fetch path attributed everything to whoever ran the batch.
+
   v2.0.78 (2026-06-25) -- Balance Audits
     - New "Balance Audits" button on the Fetch tab: for a target N and a chosen week, counts each selected agent's existing audits that week and pulls (N - existing) new, un-audited, non-deleted tickets per agent. Scope = Agents multi-select (or all known agents if none selected).
     - Added a Week picker to the date section (used only by Balance Audits). Respects current Fetch filters; newest-first; excludes tickets already audited that week.
@@ -667,7 +670,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 // The Python /proxy injects them server-side based on destination host.
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.78";
+const APP_VERSION = "v2.0.79";
 // ── Debug log buffer ─────────────────────────────────────────────────────────
 // Ring buffer of recent events + uncaught errors, so user-reported issues can be
 // traced. Export via the Settings tab button or exportWingmanLog() in the console.
@@ -4100,9 +4103,17 @@ Rules:
     if(downloadCSV) downloadFetchedCSV();
     // Map fetched tickets to QA batch format and start batch QA
     var mapped = fetchedTickets.map(mapFetchedToQA);
+    // Auto-assign evenly across all Full+Edit users (round-robin), same as the CSV upload path,
+    // so each auditor gets the same number of tickets as much as possible (counts differ by <=1).
+    var assignable = effectiveUsers.filter(function(u){return u.role==="full"||u.role==="edit";}).map(function(u){return u.name;});
+    if(assignable.length>0){
+      mapped = mapped.map(function(t,i){return Object.assign({},t,{reviewer:assignable[i%assignable.length]});});
+    }
     setBatchTickets(mapped);
     setView("batch");
-    addToast("Loaded "+mapped.length+" tickets into Batch QA — ready to score");
+    addToast(assignable.length>0
+      ? ("Loaded "+mapped.length+" tickets into Batch QA — auto-assigned across "+assignable.length+" reviewer"+(assignable.length!==1?"s":""))
+      : ("Loaded "+mapped.length+" tickets into Batch QA — ready to score"));
   }
 
   // ── MANUAL AUDIT ─────────────────────────────────────────────────────────────
