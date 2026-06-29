@@ -6,6 +6,12 @@
   Date:     2026-06-09
 
   Changelog:
+  v2.0.81 (2026-06-29) -- CSV parser: handle quoted multi-line fields
+    - parseCSV rewritten as a proper RFC-4180 parser. The old version split on newlines before honoring quotes, so any row whose transcript contained line breaks was shattered and dropped (e.g. a 178-ticket file only loaded 106 into Batch QA). Now handles embedded newlines, commas, and "" escapes; also strips a leading UTF-8 BOM.
+
+  v2.0.80 (2026-06-29) -- Timezone uniformity: all week logic on Asia/Manila
+    - Week labels (ticketWeekLabel, getWeek), the Balance Audits week picker (recentWeeks / weekLabelFromMonday), and the balance fetch window now compute in Asia/Manila (UTC+8, no DST) instead of the operator's browser timezone. This makes audit "week" tags consistent across operators and aligns them with Scout/Gorgias. Past audit labels are unchanged.
+
   v2.0.79 (2026-06-25) -- Fetch/Balance: even auditor assignment on Run QA
     - Fetch -> Run QA (incl. Balance Audits -> Run QA) now auto-assigns reviewers round-robin across Full+Edit users, so each auditor gets the same number of tickets as much as possible (counts differ by at most 1). Previously only the CSV-upload-into-Batch-QA path did this; the Fetch path attributed everything to whoever ran the batch.
 
@@ -670,7 +676,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 // The Python /proxy injects them server-side based on destination host.
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.79";
+const APP_VERSION = "v2.0.81";
 // ── Debug log buffer ─────────────────────────────────────────────────────────
 // Ring buffer of recent events + uncaught errors, so user-reported issues can be
 // traced. Export via the Settings tab button or exportWingmanLog() in the console.
@@ -1279,23 +1285,39 @@ function scoreLabel(val) {
   if (v.startsWith("NO")) return "Miss";
   return null;
 }
+// Asia/Manila (UTC+8, no DST) is the canonical timezone for all week bucketing, so audit
+// "week" labels are consistent regardless of the operator's browser zone and align with Scout/Gorgias.
+// We shift an instant by +8h and read its UTC fields to get Manila wall-clock.
+var MNL_MS = 8 * 60 * 60 * 1000;
+function _mnlFmt(instant) {
+  return new Date(instant).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "Asia/Manila" });
+}
+function mnlMondayInstant(input) {
+  var d = (input instanceof Date) ? input : new Date(input);
+  if (isNaN(d.getTime())) return null;
+  var s = new Date(d.getTime() + MNL_MS);
+  var dow = s.getUTCDay() || 7;                                   // 1=Mon..7=Sun (Manila)
+  var midMNL = Date.UTC(s.getUTCFullYear(), s.getUTCMonth(), s.getUTCDate()) - MNL_MS; // Manila 00:00 of that date
+  return midMNL - (dow - 1) * 86400000;                          // back to Monday
+}
+function mnlWeekLabel(monInstant) {
+  if (monInstant == null) return "";
+  var monShift = new Date(monInstant + MNL_MS);
+  return _mnlFmt(monInstant) + " - " + _mnlFmt(monInstant + 6 * 86400000) + " " + monShift.getUTCFullYear();
+}
+function mnlMondayStr(input) {
+  var mi = mnlMondayInstant(input);
+  if (mi == null) return "";
+  var s = new Date(mi + MNL_MS);
+  return s.getUTCFullYear() + "-" + String(s.getUTCMonth() + 1).padStart(2, "0") + "-" + String(s.getUTCDate()).padStart(2, "0");
+}
+
 function getWeek() {
-  const now = new Date(), start = new Date(now);
-  start.setDate(now.getDate() - now.getDay() + 1);
-  const end = new Date(start); end.setDate(start.getDate() + 6);
-  const fmt = d => d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
-  return fmt(start) + " - " + fmt(end) + " " + now.getFullYear();
+  return mnlWeekLabel(mnlMondayInstant(new Date()));
 }
 function ticketWeekLabel(createdDate) {
   if (!createdDate) return "";
-  const d = new Date(createdDate);
-  if (isNaN(d.getTime())) return "";
-  const start = new Date(d);
-  const day = start.getDay() || 7;
-  start.setDate(start.getDate() - day + 1);
-  const end = new Date(start); end.setDate(start.getDate() + 6);
-  const fmt = dt => dt.toLocaleDateString("en-US", { month: "short", day: "numeric" });
-  return fmt(start) + " - " + fmt(end) + " " + d.getFullYear();
+  return mnlWeekLabel(mnlMondayInstant(createdDate));
 }
 
 // Parse a week label ("Jun 9 - Jun 15 2026") into a sortable timestamp (start of week).
@@ -1311,37 +1333,48 @@ function weekSortKey(label) {
 
 // Build the Mon-Sun week label ("Jun 9 - Jun 15 2026") from a Monday Date.
 function weekLabelFromMonday(mon){
-  var end=new Date(mon); end.setDate(mon.getDate()+6);
-  var fmt=function(d){return d.toLocaleDateString("en-US",{month:"short",day:"numeric"});};
-  return fmt(mon)+" - "+fmt(end)+" "+mon.getFullYear();
+  var input=(mon instanceof Date)?mon:(mon+"T00:00:00+08:00");
+  return mnlWeekLabel(mnlMondayInstant(input));
 }
 // Last n weeks (Mondays), newest first: [{value:"YYYY-MM-DD"(Mon), label:"Jun 9 - Jun 15 2026"}].
 function recentWeeks(n){
-  var out=[]; var today=new Date(); var day=today.getDay()||7;
-  var mon0=new Date(today); mon0.setDate(today.getDate()-day+1); mon0.setHours(0,0,0,0);
+  var out=[]; var cur=mnlMondayInstant(new Date());
   for(var i=0;i<n;i++){
-    var m=new Date(mon0); m.setDate(mon0.getDate()-7*i);
-    var val=m.getFullYear()+"-"+String(m.getMonth()+1).padStart(2,"0")+"-"+String(m.getDate()).padStart(2,"0");
-    out.push({value:val,label:weekLabelFromMonday(m)});
+    var mi=cur - i*7*86400000;
+    out.push({value:mnlMondayStr(new Date(mi)), label:mnlWeekLabel(mi)});
   }
   return out;
 }
 
 // ── CSV PARSER ───────────────────────────────────────────────────────────
 function parseCSV(text) {
-  const lines = text.split(/\r?\n/).filter(l => l.trim());
-  if (lines.length < 2) return [];
-  const headers = lines[0].split(",").map(h => h.replace(/^"|"$/g, "").trim());
-  return lines.slice(1).map(line => {
-    const vals = []; let cur = "", inQ = false;
-    for (let i = 0; i < line.length; i++) {
-      if (line[i] === '"') { inQ = !inQ; }
-      else if (line[i] === ',' && !inQ) { vals.push(cur.trim()); cur = ""; }
-      else cur += line[i];
+  // RFC 4180-style parser: handles quoted fields containing commas, embedded
+  // newlines, and "" escapes. The old version split on newlines first, which
+  // shattered any row whose transcript contained line breaks.
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1); // strip BOM
+  const rows = []; let row = [], cur = "", inQ = false, i = 0; const n = text.length;
+  while (i < n) {
+    const ch = text[i];
+    if (inQ) {
+      if (ch === '"') {
+        if (text[i + 1] === '"') { cur += '"'; i += 2; continue; } // escaped quote
+        inQ = false; i++; continue;
+      }
+      cur += ch; i++; continue;
     }
-    vals.push(cur.trim());
+    if (ch === '"') { inQ = true; i++; continue; }
+    if (ch === ',') { row.push(cur); cur = ""; i++; continue; }
+    if (ch === '\r') { i++; continue; }
+    if (ch === '\n') { row.push(cur); rows.push(row); row = []; cur = ""; i++; continue; }
+    cur += ch; i++;
+  }
+  if (cur !== "" || row.length) { row.push(cur); rows.push(row); }
+  const clean = rows.filter(r => r.some(c => c.trim() !== ""));
+  if (clean.length < 2) return [];
+  const headers = clean[0].map(h => h.replace(/^\uFEFF/, "").trim());
+  return clean.slice(1).map(vals => {
     const obj = {};
-    headers.forEach((h, i) => { obj[h] = (vals[i] || "").replace(/^"|"$/g, ""); });
+    headers.forEach((h, idx) => { obj[h] = (vals[idx] != null ? vals[idx] : "").trim(); });
     return obj;
   });
 }
@@ -1603,7 +1636,7 @@ function App() {
     ticketsPerAgent:"",maxTickets:"500",skipHours:"24",
     keyword:"",
     balanceTarget:"",
-    balanceWeek:(function(){var t=new Date();var day=t.getDay()||7;var m=new Date(t);m.setDate(t.getDate()-day+1);return m.getFullYear()+"-"+String(m.getMonth()+1).padStart(2,"0")+"-"+String(m.getDate()).padStart(2,"0");})()
+    balanceWeek:mnlMondayStr(new Date())
   });
   const [fetchLoading,setFetchLoading]=useState(false);
   const fetchCancelRef=useRef(false);
@@ -3774,12 +3807,10 @@ Rules:
       if(balance) {
         if(!balanceTarget || balanceTarget < 1) { setFetchError("Enter a target number of audits per agent."); setFetchLoading(false); return; }
         if(!f.balanceWeek) { setFetchError("Pick a week for Balance Audits."); setFetchLoading(false); return; }
-        var bMon = new Date(f.balanceWeek+"T00:00:00");
-        var bSun = new Date(bMon); bSun.setDate(bMon.getDate()+6);
-        var pad2 = function(x){return String(x).padStart(2,"0");};
-        since = f.balanceWeek+"T00:00:00";
-        until = bSun.getFullYear()+"-"+pad2(bSun.getMonth()+1)+"-"+pad2(bSun.getDate())+"T23:59:59";
-        balanceWeekLabel = weekLabelFromMonday(bMon);
+        var bMonInst = new Date(f.balanceWeek+"T00:00:00+08:00").getTime();        // Manila Monday 00:00 as an instant
+        since = new Date(bMonInst).toISOString().slice(0,19);                       // UTC equivalent (Gorgias datetimes are UTC)
+        until = new Date(bMonInst + 7*86400000 - 1000).toISOString().slice(0,19);   // through Manila Sunday 23:59:59, in UTC
+        balanceWeekLabel = mnlWeekLabel(mnlMondayInstant(bMonInst));
         balanceScopeNames = Object.entries(f.selectedAgents||{}).filter(function(e){return e[1];}).map(function(e){return e[0];});
         if(!balanceScopeNames.length) balanceScopeNames = [...new Set(tickets.map(function(t){return t.agentName;}).filter(Boolean))];
         balanceScopeNames.forEach(function(nm){ balanceExisting[nm.toLowerCase()] = 0; });
