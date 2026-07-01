@@ -6,6 +6,9 @@
   Date:     2026-06-09
 
   Changelog:
+  v2.0.82 (2026-06-30) -- Fix Open-in-Gorgias URL for Scout-sourced tickets
+    - Scout stored ticket_url as /app/tickets/ (plural); Gorgias's ticket view is /app/ticket/ (singular). Wingman now normalizes the URL on CSV import and on load from Notion, so "Open in Gorgias" works for Scout-exported tickets (and any already saved). Wingman's own fetched tickets were already correct. (Scout server.py fixed at the source + backfills existing rows.)
+
   v2.0.81 (2026-06-29) -- CSV parser: handle quoted multi-line fields
     - parseCSV rewritten as a proper RFC-4180 parser. The old version split on newlines before honoring quotes, so any row whose transcript contained line breaks was shattered and dropped (e.g. a 178-ticket file only loaded 106 into Batch QA). Now handles embedded newlines, commas, and "" escapes; also strips a leading UTF-8 BOM.
 
@@ -676,7 +679,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 // The Python /proxy injects them server-side based on destination host.
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.81";
+const APP_VERSION = "v2.0.82";
 // ── Debug log buffer ─────────────────────────────────────────────────────────
 // Ring buffer of recent events + uncaught errors, so user-reported issues can be
 // traced. Export via the Settings tab button or exportWingmanLog() in the console.
@@ -861,7 +864,7 @@ async function loadTicketsFromNotion(dbId, onStatus) {
     ticketId: getProp(page,"Ticket ID")||"", agentName: getProp(page,"Agent")||"",
     reviewer: getProp(page,"Auditor")||"", week: getProp(page,"Week")||"",
     createdDate: getProp(page,"Created Date")||"", contactReason: getProp(page,"Contact Reason")||"",
-    subject: getProp(page,"Subject")||"", ticketUrl: getProp(page,"Ticket URL")||"",
+    subject: getProp(page,"Subject")||"", ticketUrl: (getProp(page,"Ticket URL")||"").replace("/app/tickets/","/app/ticket/"),
     aiScore: getProp(page,"AI Score")??0, finalScore: getProp(page,"Final Score")??0,
     aiPassed: getProp(page,"AI Passed")??false, finalPassed: getProp(page,"Final Passed")??false,
     reviewed:      getProp(page,"Reviewed")??false,
@@ -1379,7 +1382,7 @@ function parseCSV(text) {
   });
 }
 function mapRow(row) {
-  const url = row["ticket_url"] || row["Ticket URL"] || "";
+  const url = (row["ticket_url"] || row["Ticket URL"] || "").replace("/app/tickets/", "/app/ticket/");  // Gorgias ticket view is singular
   const directId = row["ticket_id"] || row["Ticket ID"] || "";
   const rawId = directId ? String(directId).trim().replace(/^=?"?|"?$/g, "") : (url.match(/(\d+)\/?$/) || [])[1] || url;
   const cr1 = row["contact_reason_l1"] || "", cr2 = row["contact_reason_l2"] || "";
