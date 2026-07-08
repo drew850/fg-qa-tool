@@ -2,10 +2,17 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.83
+  Version:  2.0.84
   Date:     2026-06-09
 
   Changelog:
+  v2.0.84 (2026-07-08) -- Exclude QA team from the auditable agent list
+    - Added EXCLUDED_AGENT_NAMES (Jean T., Jero, Marco O., Naomi, Drew) — these are QA/management staff, not CX agents, and shouldn't be selectable or fetchable for audit.
+    - Fetch: Gorgias fetch loop now hard-skips any ticket whose assignee resolves to an excluded name — applies regardless of whether "All agents" or a specific selection is used, and covers Balance Audits too since it shares the same loop. New "Skipped — QA team agent" counter added to the fetch summary.
+    - AGENT_LIST (used by Manual Audit's agent dropdown and the Admin panel's per-user Agent Name assignment) filtered to exclude the same names.
+    - The dynamically-derived `agents` list (Fetch tab's Agent multi-select, Dashboard "By agent" breakdown, Balance Audits scope) filtered the same way, so excluded names no longer appear as selectable/reportable agents anywhere in-app.
+    - Re-confirmed the v2.0.83 report-generation fix: the agent-facing exported report (My Reports .doc) has no remaining auditor-name references — verified no other code path reintroduces it.
+
   v2.0.83 (2026-07-08) -- Fix: auditor identity still leaking to view/agent-role users in several spots
     - Review tab "✓ Reviewed by {name}" banner showed the auditor's name to agent/view-role users once a ticket was reviewed — banner now just says "✓ Reviewed" for that role, name still shown to Edit/Full.
     - Audit History (re-audit) expandable rows showed the auditor per version to all roles — auditor name now Edit/Full only.
@@ -716,7 +723,9 @@ const WINGMAN_LOGO = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAQ
   var l=document.createElement("link"); l.rel=rel; l.href=WINGMAN_LOGO; document.head.appendChild(l);
 }); }catch(e){} })();
 const REPORTS_DB_ID = "3684e96c994180db8929c67f306c554a";
-const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."];
+// QA team members — never auditable as CX agents, even if they historically had an agentName tag
+const EXCLUDED_AGENT_NAMES = ["Jean T.","Jero","Marco O.","Naomi","Drew"];
+const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."].filter(function(a){return !EXCLUDED_AGENT_NAMES.includes(a);});
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
 const CONFIG_DB_ID = "3574e96c994180c08a40f31e89db80ce";
 const HARDCODED_SETUP = { ticketsDbId: TICKETS_DB_ID, configDbId: CONFIG_DB_ID };
@@ -1884,7 +1893,7 @@ function App() {
     return t.week===week;
   });
   var currentAuditWeek=week;
-  var agents=[...new Set(tickets.map(function(t){return t.agentName;}).filter(Boolean))].sort();
+  var agents=[...new Set(tickets.map(function(t){return t.agentName;}).filter(Boolean))].filter(function(a){return !EXCLUDED_AGENT_NAMES.includes(a);}).sort();
 
   function addToast(msg,type){
     var id=Date.now()+Math.random();
@@ -3863,7 +3872,7 @@ Rules:
 
       var fc = {
         scanned:0, raw:0, skippedStatus:0, skippedRecentlyClosed:0,
-        skippedChannel:0, skippedAgentFilter:0,
+        skippedChannel:0, skippedAgentFilter:0, skippedExcludedAgent:0,
         skippedCR:0, skippedRes:0, skippedMsgCount:0, skippedKeyword:0,
         skippedAgentCap:0, skippedDeleted:0, skippedMsgFetch:0, skippedAlreadyAudited:0, rateLimited:false, result:0
       };
@@ -3960,6 +3969,10 @@ Rules:
           if(t.assignee_user) {
             var au = t.assignee_user;
             agentName = au.name || ((au.firstname||"")+" "+(au.lastname||"")).trim();
+          }
+
+          if(agentName && EXCLUDED_AGENT_NAMES.includes(agentName)) {
+            fc.skippedExcludedAgent++; fdbg(tid,"SKIP excluded agent: '"+agentName+"' is QA team, not auditable"); continue;
           }
 
           if(selectedAgentNames.length && agentName && !selectedAgentNames.includes(agentName.toLowerCase())) {
@@ -5791,6 +5804,7 @@ Rules:
                     {label:"Skipped — too recent",val:fetchSummary.skippedRecentlyClosed,color:fetchSummary.skippedRecentlyClosed>0?"var(--color-text-warning)":null},
                     {label:"Skipped — channel",val:fetchSummary.skippedChannel,color:fetchSummary.skippedChannel>0?"var(--color-text-warning)":null},
                     {label:"Skipped — agent filter",val:fetchSummary.skippedAgentFilter,color:fetchSummary.skippedAgentFilter>0?"var(--color-text-warning)":null},
+                    {label:"Skipped — QA team agent",val:fetchSummary.skippedExcludedAgent,color:fetchSummary.skippedExcludedAgent>0?"var(--color-text-warning)":null},
                     {label:"Skipped — contact reason",val:fetchSummary.skippedCR,color:fetchSummary.skippedCR>0?"var(--color-text-warning)":null},
                     {label:"Skipped — resolution",val:fetchSummary.skippedRes,color:fetchSummary.skippedRes>0?"var(--color-text-warning)":null},
                     {label:"Skipped — msg count",val:fetchSummary.skippedMsgCount,color:fetchSummary.skippedMsgCount>0?"var(--color-text-warning)":null},
