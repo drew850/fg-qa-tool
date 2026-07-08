@@ -2,10 +2,14 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.84
+  Version:  2.0.85
   Date:     2026-06-09
 
   Changelog:
+  v2.0.85 (2026-07-08) -- Fix: Maria C. (and any agent) could get silently split into two entries
+    - Root cause: agentName is read from several sources (live Gorgias assignee_user.name on fetch, the "Agent" property when loading from Notion, CSV import) and any of them could carry a stray non-breaking space, doubled space, or leading/trailing whitespace that's invisible in the UI but makes the string byte-for-byte different from the canonical "Maria C." — so it silently became a second "agent" everywhere names are grouped: the Review "Agent" filter dropdown, the Dashboard "By agent" breakdown, and worst of all Balance Audits, where the variant with 0 tracked audits looked short of target and had 6 more tickets pulled for Maria C. on top of the 12 she already had that week (target was 6).
+    - Added normalizeAgentName() (collapses NBSP + repeated whitespace, trims ends) and applied it at every point agentName enters the app: Notion ticket load (both parse paths), CSV import, and the live Gorgias fetch loop. Because this runs when data is read into the app (not just on write), it also self-heals existing split records in Notion the next time they're loaded — no manual data cleanup needed in Notion itself.
+
   v2.0.84 (2026-07-08) -- Exclude QA team from the auditable agent list
     - Added EXCLUDED_AGENT_NAMES (Jean T., Jero, Marco O., Naomi, Drew) — these are QA/management staff, not CX agents, and shouldn't be selectable or fetchable for audit.
     - Fetch: Gorgias fetch loop now hard-skips any ticket whose assignee resolves to an excluded name — applies regardless of whether "All agents" or a specific selection is used, and covers Balance Audits too since it shares the same loop. New "Skipped — QA team agent" counter added to the fetch summary.
@@ -726,6 +730,11 @@ const REPORTS_DB_ID = "3684e96c994180db8929c67f306c554a";
 // QA team members — never auditable as CX agents, even if they historically had an agentName tag
 const EXCLUDED_AGENT_NAMES = ["Jean T.","Jero","Marco O.","Naomi","Drew"];
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."].filter(function(a){return !EXCLUDED_AGENT_NAMES.includes(a);});
+// Collapses NBSP/double-space/leading-trailing whitespace so the same person never gets
+// split into two "different" agents (e.g. "Maria C." vs "Maria C. " from a Gorgias display-name edit).
+function normalizeAgentName(s){
+  return (s||"").replace(/\u00A0/g," ").replace(/\s+/g," ").trim();
+}
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
 const CONFIG_DB_ID = "3574e96c994180c08a40f31e89db80ce";
 const HARDCODED_SETUP = { ticketsDbId: TICKETS_DB_ID, configDbId: CONFIG_DB_ID };
@@ -877,7 +886,7 @@ async function loadTicketsFromNotion(dbId, onStatus) {
   log("Parsing " + pages.length + " tickets");
   return pages.map(page => parseNotionRow({
     pageId: page.id,
-    ticketId: getProp(page,"Ticket ID")||"", agentName: getProp(page,"Agent")||"",
+    ticketId: getProp(page,"Ticket ID")||"", agentName: normalizeAgentName(getProp(page,"Agent")||""),
     reviewer: getProp(page,"Auditor")||"", week: getProp(page,"Week")||"",
     createdDate: getProp(page,"Created Date")||"", contactReason: getProp(page,"Contact Reason")||"",
     subject: getProp(page,"Subject")||"", ticketUrl: (getProp(page,"Ticket URL")||"").replace("/app/tickets/","/app/ticket/"),
@@ -1139,7 +1148,7 @@ function parseNotionRow(r) {
   });
   // Support both camelCase (our mapped names) and "Title Case" (direct Notion field names)
   const ticketId  = r.ticketId  || r["Ticket ID"]  || r.title || "";
-  const agentName = r.agentName || r["Agent"]       || r.agent || "";
+  const agentName = normalizeAgentName(r.agentName || r["Agent"]       || r.agent || "");
   const reviewer  = r.reviewer  || r["Auditor"]     || r.auditor || "";
   const aiScore   = parseFloat(r.aiScore    ?? r["AI Score"]    ?? 0) || 0;
   const finalScore= parseFloat(r.finalScore ?? r["Final Score"] ?? aiScore) || 0;
@@ -1411,7 +1420,7 @@ function mapRow(row) {
     ticketUrl: url,
     subject: row["subject"] || row["Subject"] || "",
     status: row["status"] || "",
-    agentName: row["agent"] || row["Agent"] || "",
+    agentName: normalizeAgentName(row["agent"] || row["Agent"] || ""),
     createdDate: row["created_date"] || row["Created Date"] || "",
     closedDate: row["closed_date"] || "",
     customerEmail: row["customer_email"] || "",
@@ -3968,7 +3977,7 @@ Rules:
           var agentName = "";
           if(t.assignee_user) {
             var au = t.assignee_user;
-            agentName = au.name || ((au.firstname||"")+" "+(au.lastname||"")).trim();
+            agentName = normalizeAgentName(au.name || ((au.firstname||"")+" "+(au.lastname||"")).trim());
           }
 
           if(agentName && EXCLUDED_AGENT_NAMES.includes(agentName)) {
