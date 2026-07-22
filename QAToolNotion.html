@@ -2,10 +2,19 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.85
+  Version:  2.0.86
   Date:     2026-06-09
 
   Changelog:
+  v2.0.86 (2026-07-13) -- New feature: Team Calibration (blind human inter-rater calibration)
+    - New "Team Calibration" tab, visible to Edit/Full, hidden from View/Agent. Distinct from the existing AI-vs-dispute "Calibration" tab — this measures auditor-vs-auditor agreement.
+    - Setup (Full-only): pick a week, generates a pool of one ticket per active auditor who reviewed at least one ticket that week (auditors with zero reviewed tickets that week are skipped from the pool but still participate as reviewers, with a re-roll option per pool ticket before confirming.
+    - On confirm: every active Edit/Full auditor is assigned every pool ticket EXCEPT the one they originally reviewed (no self-review).
+    - Blind scoring: each auditor gets a "My Calibration Queue" showing their assigned tickets. Scoring a ticket shows only the transcript, agent, and contact reason — the original AI score, the original human reviewer's identity/score, and every other auditor's score are hidden until the round's insights are generated. Includes the same autofail flag + condition capture as the main rubric.
+    - "Calibrate" (Full-only): can be run anytime, with a confirm-dialog warning if the round isn't fully complete (works on whatever's done — minimum 2 completed reviews just to have something to compare). Sends all blind scores + notes to Claude (Sonnet, same call used for weekly Team Insights), alongside the original AI/human score as reference-only context (never shown to blind reviewers), and returns category agreement, per-auditor lean (lenient/strict), autofail agreement, highest-divergence tickets with quoted reasoning, and rubric/scoring-context recommendations.
+    - Insights are saved to Notion (chunked, same pattern as Reports) so past rounds can be reopened later — visible to both Edit and Full. Export to .doc supported.
+    - REQUIRES SETUP: two new Notion databases must be created before this works — "Team Calibration Rounds" and "Team Calibration Reviews" — with their IDs pasted into the CALIB_ROUNDS_DB_ID / CALIB_REVIEWS_DB_ID placeholders near the top of this file. Schema details in the handoff notes. This has not been tested against live data.
+
   v2.0.85 (2026-07-08) -- Fix: Maria C. (and any agent) could get silently split into two entries
     - Root cause: agentName is read from several sources (live Gorgias assignee_user.name on fetch, the "Agent" property when loading from Notion, CSV import) and any of them could carry a stray non-breaking space, doubled space, or leading/trailing whitespace that's invisible in the UI but makes the string byte-for-byte different from the canonical "Maria C." — so it silently became a second "agent" everywhere names are grouped: the Review "Agent" filter dropdown, the Dashboard "By agent" breakdown, and worst of all Balance Audits, where the variant with 0 tracked audits looked short of target and had 6 more tickets pulled for Maria C. on top of the 12 she already had that week (target was 6).
     - Added normalizeAgentName() (collapses NBSP + repeated whitespace, trims ends) and applied it at every point agentName enters the app: Notion ticket load (both parse paths), CSV import, and the live Gorgias fetch loop. Because this runs when data is read into the app (not just on write), it also self-heals existing split records in Notion the next time they're loaded — no manual data cleanup needed in Notion itself.
@@ -697,7 +706,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 // The Python /proxy injects them server-side based on destination host.
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.82";
+const APP_VERSION = "v2.0.86";
 // ── Debug log buffer ─────────────────────────────────────────────────────────
 // Ring buffer of recent events + uncaught errors, so user-reported issues can be
 // traced. Export via the Settings tab button or exportWingmanLog() in the console.
@@ -737,6 +746,9 @@ function normalizeAgentName(s){
 }
 const TICKETS_DB_ID = "3564e96c9941800786f6e190e6f47505";
 const CONFIG_DB_ID = "3574e96c994180c08a40f31e89db80ce";
+// Team Calibration — create these 2 Notion DBs (schema in handoff notes), then paste their IDs here.
+const CALIB_ROUNDS_DB_ID = "REPLACE_WITH_CALIB_ROUNDS_DB_ID";
+const CALIB_REVIEWS_DB_ID = "REPLACE_WITH_CALIB_REVIEWS_DB_ID";
 const HARDCODED_SETUP = { ticketsDbId: TICKETS_DB_ID, configDbId: CONFIG_DB_ID };
 const PASS_THRESHOLD = 85;
 
@@ -1539,7 +1551,7 @@ var btnSuccess = { background: "var(--color-background-success)", color: "var(--
 var ghost = { background: "transparent", color: "var(--color-text-secondary)", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", padding: "6px 14px", cursor: "pointer", fontSize: "13px" };
 var sectionLabel = { fontSize: "11px", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--color-text-secondary)", margin: "0 0 8px" };
 
-const NAV_TABS = [["fetch", "Fetch Tickets"], ["batch", "Batch QA"], ["manual", "Manual Audit"], ["dashboard", "Dashboard"], ["review", "Review"], ["myreports", "My Reports"], ["reports", "Reports"], ["matrix", "Matrix"], ["calibration", "Calibration"]];
+const NAV_TABS = [["fetch", "Fetch Tickets"], ["batch", "Batch QA"], ["manual", "Manual Audit"], ["dashboard", "Dashboard"], ["review", "Review"], ["myreports", "My Reports"], ["reports", "Reports"], ["matrix", "Matrix"], ["calibration", "Calibration"], ["teamcal", "Team Calibration"]];
 
 const STATUS_OPTS = ["closed","open"];
 const CHANNEL_OPTS = ["api","chat","contact_form","email","facebook","facebook-messenger","help-center","instagram-ad-comment","instagram-comment","instagram-direct-message","sms"];
@@ -1693,6 +1705,25 @@ function App() {
   const [calibrationRunning,setCalibrationRunning]=useState(false);
   const [calibrationResult,setCalibrationResult]=useState(null);
   const [calibrationBaseline,setCalibrationBaseline]=useState(""); // ISO date; only disputes on/after are analyzed
+
+  // ── Team Calibration (human inter-rater calibration) ──
+  const [teamCalibRounds,setTeamCalibRounds]=useState([]);           // round summaries, newest first
+  const [teamCalibRoundsLoaded,setTeamCalibRoundsLoaded]=useState(false);
+  const [teamCalibRoundsLoading,setTeamCalibRoundsLoading]=useState(false);
+  const [activeTeamCalibWeek,setActiveTeamCalibWeek]=useState("");   // which round is open
+  const [teamCalibDetail,setTeamCalibDetail]=useState(null);         // full detail of the open round
+  const [teamCalibDetailLoading,setTeamCalibDetailLoading]=useState(false);
+  const [myCalibAssignments,setMyCalibAssignments]=useState([]);     // this user's assignments for the open round
+  const [calibSetupWeek,setCalibSetupWeek]=useState("");
+  const [calibPreview,setCalibPreview]=useState(null);               // {week, pool:[], participants:[], skipped:[]}
+  const [calibGenerating,setCalibGenerating]=useState(false);
+  const [calibConfirming,setCalibConfirming]=useState(false);
+  const [calibScoringAssignment,setCalibScoringAssignment]=useState(null); // assignment record being blind-scored
+  const [calibScoringTicket,setCalibScoringTicket]=useState(null);   // the underlying ticket data (blind-safe fields only)
+  const [calibScoringDraft,setCalibScoringDraft]=useState({});       // {catId:{level,justification}}
+  const [calibSubmitting,setCalibSubmitting]=useState(false);
+  const [teamCalibRunning,setTeamCalibRunning]=useState(false);
+  const [teamCalibStatus,setTeamCalibStatus]=useState("");
   // #2 Agent edit
   const [editingAgent,setEditingAgent]=useState(false);
   const [agentEditValue,setAgentEditValue]=useState("");
@@ -4364,6 +4395,353 @@ Rules:
       +"</div></body></html>";
   }
 
+  // ══════════════════════════════════════════════════════════════════════
+  // TEAM CALIBRATION — blind inter-rater calibration for human auditors.
+  // Distinct from the AI-vs-dispute "Calibration" tab above: this measures
+  // auditor-vs-auditor agreement, not AI-vs-human agreement.
+  // ══════════════════════════════════════════════════════════════════════
+
+  function calibAssignmentId(week, ticketId, reviewerEmail) {
+    return (week+"_"+ticketId+"_"+reviewerEmail).replace(/[^a-zA-Z0-9_.@-]/g,"_");
+  }
+
+  // Build a preview of the round: one ticket per active auditor who reviewed
+  // at least one ticket that week. Auditors with zero reviewed tickets that
+  // week are skipped from the POOL but still participate as reviewers.
+  function generateCalibPreview(weekLabel) {
+    if(!weekLabel) { addToast("Pick a week first","error"); return; }
+    setCalibGenerating(true);
+    try {
+      var weekTickets = tickets.filter(function(t){return t.week===weekLabel;});
+      var activeAuditors = effectiveUsers.filter(function(u){return u.role==="edit"||u.role==="full";});
+      if(!activeAuditors.length){ addToast("No active Edit/Full auditors found","error"); setCalibGenerating(false); return; }
+      var pool=[], skipped=[];
+      activeAuditors.forEach(function(u){
+        var theirs = weekTickets.filter(function(t){return t.reviewer===u.name;});
+        if(theirs.length){
+          pool.push({
+            ticketId: theirs[0].ticketId, agentName: theirs[0].agentName, contactReason: theirs[0].contactReason,
+            originalReviewerName: u.name, originalReviewerEmail: u.email,
+            candidateIds: theirs.map(function(t){return t.ticketId;}), candidateIdx: 0
+          });
+        } else { skipped.push(u.name); }
+      });
+      if(!pool.length){ addToast("No auditor reviewed any tickets for "+weekLabel,"error"); setCalibGenerating(false); return; }
+      setCalibPreview({ week: weekLabel, pool: pool, participants: activeAuditors.map(function(u){return {name:u.name,email:u.email};}), skipped: skipped });
+    } catch(e){ addToast("Failed to build preview: "+e.message,"error"); }
+    setCalibGenerating(false);
+  }
+
+  // Swap a pool ticket for a different one from the same auditor's tickets that week
+  function rerollCalibPick(poolIdx) {
+    setCalibPreview(function(cp){
+      if(!cp) return cp;
+      var pool = cp.pool.map(function(p,i){
+        if(i!==poolIdx || p.candidateIds.length<2) return p;
+        var nextIdx = (p.candidateIdx+1) % p.candidateIds.length;
+        var nextTicketId = p.candidateIds[nextIdx];
+        var t = tickets.find(function(tk){return String(tk.ticketId)===String(nextTicketId);});
+        return Object.assign({},p,{ candidateIdx: nextIdx, ticketId: nextTicketId, agentName: t?t.agentName:p.agentName, contactReason: t?t.contactReason:p.contactReason });
+      });
+      return Object.assign({},cp,{pool:pool});
+    });
+  }
+
+  // Writes the Round record + one Review assignment per (pool ticket × participant),
+  // skipping the ticket's own original reviewer (no self-review).
+  async function confirmCalibRound() {
+    if(!calibPreview) return;
+    setCalibConfirming(true);
+    try {
+      var week = calibPreview.week;
+      var nowIso = new Date().toISOString();
+      var roundProps = {
+        "Week": { title: [{ text: { content: week } }] },
+        "Status": { rich_text: [{ text: { content: "In Progress" } }] },
+        "Participants": { rich_text: [{ text: { content: JSON.stringify(calibPreview.participants) } }] },
+        "Pool": { rich_text: [{ text: { content: JSON.stringify(calibPreview.pool) } }] },
+        "Created At": { rich_text: [{ text: { content: nowIso } }] },
+        "Created By": { rich_text: [{ text: { content: currentUser.name } }] }
+      };
+      await notionAPI("/v1/pages","POST",{parent:{database_id:CALIB_ROUNDS_DB_ID},properties:roundProps});
+
+      var created=0, failed=0;
+      for(var pi=0; pi<calibPreview.pool.length; pi++){
+        var p = calibPreview.pool[pi];
+        for(var qi=0; qi<calibPreview.participants.length; qi++){
+          var part = calibPreview.participants[qi];
+          if(part.email===p.originalReviewerEmail) continue; // no self-review
+          var assignId = calibAssignmentId(week, p.ticketId, part.email);
+          var reviewProps = {
+            "Assignment ID": { title: [{ text: { content: assignId } }] },
+            "Week": { rich_text: [{ text: { content: week } }] },
+            "Ticket ID": { rich_text: [{ text: { content: String(p.ticketId) } }] },
+            "Reviewer Email": { rich_text: [{ text: { content: part.email } }] },
+            "Reviewer Name": { rich_text: [{ text: { content: part.name } }] },
+            "Status": { rich_text: [{ text: { content: "Pending" } }] }
+          };
+          try { await notionAPI("/v1/pages","POST",{parent:{database_id:CALIB_REVIEWS_DB_ID},properties:reviewProps}); created++; }
+          catch(e){ failed++; console.error("[TeamCalib] Failed to create assignment",assignId,e.message); }
+        }
+      }
+      addToast("Round created — "+created+" review"+(created!==1?"s":"")+" assigned"+(failed?" ("+failed+" failed — re-run setup to retry)":""));
+      setCalibPreview(null); setCalibSetupWeek("");
+      await loadTeamCalibRounds();
+      await openTeamCalibRound(week);
+    } catch(e){ addToast("Failed to create round: "+e.message,"error"); }
+    setCalibConfirming(false);
+  }
+
+  async function loadTeamCalibRounds() {
+    setTeamCalibRoundsLoading(true);
+    try {
+      var rounds=[], cursor=undefined, hasMore=true;
+      while(hasMore){
+        var body={page_size:100};
+        if(cursor) body.start_cursor=cursor;
+        var data = await notionAPI("/v1/databases/"+CALIB_ROUNDS_DB_ID+"/query","POST",body);
+        (data.results||[]).forEach(function(page){
+          var pool = tryParseJSON(getProp(page,"Pool")||"[]")||[];
+          rounds.push({
+            pageId: page.id, week: getProp(page,"Week")||"", status: getProp(page,"Status")||"Setup",
+            participants: tryParseJSON(getProp(page,"Participants")||"[]")||[],
+            poolCount: pool.length, createdAt: getProp(page,"Created At")||"", createdBy: getProp(page,"Created By")||"",
+            insightsGeneratedAt: getProp(page,"Insights Generated At")||""
+          });
+        });
+        hasMore = data.has_more||false; cursor = data.next_cursor;
+      }
+      rounds.sort(function(a,b){return (b.createdAt||"").localeCompare(a.createdAt||"");});
+      setTeamCalibRounds(rounds); setTeamCalibRoundsLoaded(true);
+    } catch(e){ addToast("Failed to load calibration rounds: "+e.message,"error"); }
+    setTeamCalibRoundsLoading(false);
+  }
+
+  async function openTeamCalibRound(week) {
+    setActiveTeamCalibWeek(week); setTeamCalibDetail(null); setTeamCalibDetailLoading(true);
+    try {
+      var round = teamCalibRounds.find(function(r){return r.week===week;});
+      if(!round){ addToast("Round not found — try Refresh","error"); setTeamCalibDetailLoading(false); return; }
+      var detail = Object.assign({}, round, {insights:null});
+      if(round.insightsGeneratedAt){
+        var page = await notionAPI("/v1/pages/"+round.pageId,"GET");
+        var chunks=[]; for(var i=1;i<=10;i++) chunks.push(getProp(page,"Insights Content "+i)||"");
+        detail.insights = tryParseJSON(chunks.join(""));
+      }
+      setTeamCalibDetail(detail);
+
+      var mine=[], cursor=undefined, hasMore=true;
+      while(hasMore){
+        var body={page_size:100, filter:{and:[
+          {property:"Week", rich_text:{equals:week}},
+          {property:"Reviewer Email", rich_text:{equals:currentUser.email}}
+        ]}};
+        if(cursor) body.start_cursor=cursor;
+        var data = await notionAPI("/v1/databases/"+CALIB_REVIEWS_DB_ID+"/query","POST",body);
+        (data.results||[]).forEach(function(page){
+          mine.push({
+            pageId: page.id, ticketId: getProp(page,"Ticket ID")||"", status: getProp(page,"Status")||"Pending",
+            scores: tryParseJSON(getProp(page,"Scores")||"{}")||{}, notes: tryParseJSON(getProp(page,"Notes")||"{}")||{},
+            autofail: getProp(page,"Autofail")||false
+          });
+        });
+        hasMore=data.has_more||false; cursor=data.next_cursor;
+      }
+      setMyCalibAssignments(mine);
+    } catch(e){ addToast("Failed to open round: "+e.message,"error"); }
+    setTeamCalibDetailLoading(false);
+  }
+
+  // Blind snapshot — deliberately omits reviewer, reviewerNotes, scores, aiScores,
+  // finalScore, disputes, justifications. The assigned auditor sees only what's
+  // needed to score fresh: the transcript, agent, contact reason, ticket link.
+  function startCalibScoring(assignment) {
+    var t = tickets.find(function(tk){return String(tk.ticketId)===String(assignment.ticketId);});
+    if(!t) { addToast("Could not find ticket #"+assignment.ticketId+" in the loaded ticket list — try Refresh on Dashboard first","error"); return; }
+    setCalibScoringTicket({ ticketId: t.ticketId, agentName: t.agentName, contactReason: t.contactReason, transcript: t.transcript, ticketUrl: t.ticketUrl });
+    var draft={};
+    matrix.forEach(function(c){ draft[c.id] = { level: (assignment.scores&&assignment.scores[c.id])||"", justification: (assignment.notes&&assignment.notes[c.id])||"" }; });
+    draft._autofail = { flagged: assignment.autofail||false, condition: (assignment.notes&&assignment.notes._autofail)||"" };
+    setCalibScoringDraft(draft);
+    setCalibScoringAssignment(assignment);
+  }
+
+  function updateCalibDraft(catId, field, value) {
+    setCalibScoringDraft(function(d){ return Object.assign({}, d, { [catId]: Object.assign({}, d[catId]||{}, { [field]: value }) }); });
+  }
+
+  async function submitCalibReview() {
+    if(!calibScoringAssignment) return;
+    var missing = matrix.filter(function(c){ return !(calibScoringDraft[c.id]&&calibScoringDraft[c.id].level); });
+    if(missing.length) { addToast("Score every category before submitting ("+missing.map(function(c){return c.label;}).join(", ")+" missing)","error"); return; }
+    var autofailDraft = calibScoringDraft._autofail||{flagged:false,condition:""};
+    if(autofailDraft.flagged && !autofailDraft.condition) { addToast("Select which autofail condition applies","error"); return; }
+    setCalibSubmitting(true);
+    try {
+      var scores={}, notes={};
+      matrix.forEach(function(c){ scores[c.id]=calibScoringDraft[c.id].level; notes[c.id]=calibScoringDraft[c.id].justification||""; });
+      notes._autofail = autofailDraft.flagged ? autofailDraft.condition : "";
+      var patch = {
+        "Status": { rich_text:[{text:{content:"Complete"}}] },
+        "Scores": { rich_text:[{text:{content: JSON.stringify(scores)}}] },
+        "Notes": { rich_text:[{text:{content: JSON.stringify(notes)}}] },
+        "Autofail": { checkbox: !!autofailDraft.flagged },
+        "Submitted At": { rich_text:[{text:{content: new Date().toISOString()}}] }
+      };
+      await notionAPI("/v1/pages/"+calibScoringAssignment.pageId,"PATCH",{properties:patch});
+      setMyCalibAssignments(function(list){ return list.map(function(a){ return a.pageId===calibScoringAssignment.pageId ? Object.assign({},a,{status:"Complete",scores:scores,notes:notes,autofail:!!autofailDraft.flagged}) : a; }); });
+      addToast("Review submitted");
+      setCalibScoringAssignment(null); setCalibScoringTicket(null); setCalibScoringDraft({});
+    } catch(e){ addToast("Failed to submit review: "+e.message,"error"); }
+    setCalibSubmitting(false);
+  }
+
+  // Full-only. Pulls every reviewer's blind scores for every pool ticket in the round,
+  // plus the original AI/human score as reference context (not shown to blind reviewers,
+  // but useful for the analysis to compare the original scorer against the blind consensus).
+  async function runTeamCalibration(week) {
+    var round = teamCalibRounds.find(function(r){return r.week===week;});
+    if(!round){ addToast("Round not found","error"); return; }
+    setTeamCalibRunning(true); setTeamCalibStatus("Gathering reviews...");
+    try {
+      var allReviews=[], cursor=undefined, hasMore=true;
+      while(hasMore){
+        var body={page_size:100, filter:{property:"Week", rich_text:{equals:week}}};
+        if(cursor) body.start_cursor=cursor;
+        var data = await notionAPI("/v1/databases/"+CALIB_REVIEWS_DB_ID+"/query","POST",body);
+        (data.results||[]).forEach(function(page){
+          allReviews.push({
+            ticketId: getProp(page,"Ticket ID")||"", reviewerName: getProp(page,"Reviewer Name")||"",
+            status: getProp(page,"Status")||"Pending", scores: tryParseJSON(getProp(page,"Scores")||"{}")||{},
+            notes: tryParseJSON(getProp(page,"Notes")||"{}")||{}, autofail: getProp(page,"Autofail")||false
+          });
+        });
+        hasMore=data.has_more||false; cursor=data.next_cursor;
+      }
+      var completed = allReviews.filter(function(r){return r.status==="Complete";});
+      if(completed.length < 2) { addToast("Need at least 2 completed reviews to compare anything ("+completed.length+" of "+allReviews.length+" done)","error"); setTeamCalibRunning(false); setTeamCalibStatus(""); return; }
+
+      setTeamCalibStatus("Building analysis...");
+      var byTicket={};
+      completed.forEach(function(r){ (byTicket[r.ticketId]=byTicket[r.ticketId]||[]).push(r); });
+      var ticketData = Object.keys(byTicket).map(function(tid){
+        var orig = tickets.find(function(t){return String(t.ticketId)===String(tid);});
+        return {
+          ticketId: tid, agentName: orig?orig.agentName:"", contactReason: orig?orig.contactReason:"",
+          originalAiScores: orig?(orig.aiScores||{}):{}, originalHumanReviewer: orig?orig.reviewer:"", originalHumanScores: orig?(orig.scores||{}):{}, originalAutofail: orig?!!orig.autofail:false,
+          blindReviews: byTicket[tid].map(function(r){ return {reviewer:r.reviewerName, scores:r.scores, notes:r.notes, autofailFlagged:!!r.autofail, autofailCondition:(r.notes&&r.notes._autofail)||""}; })
+        };
+      });
+      var rubricText = matrix.map(function(c){return c.label+": "+c.levels.map(function(l){return l.level+(l.points!==null?" ("+l.points+")":"");}).join("/");}).join("\n");
+      var prompt = "You are analyzing a QA team's inter-rater calibration exercise for Freedom Grooming customer support.\n\n"
+        +"Each ticket below was independently, blindly re-scored by multiple auditors (they could not see each other's scores, the original AI score, or the original human reviewer's score while scoring). Each blind review also includes whether that auditor flagged the ticket as an autofail and which condition, if so. Find where auditors agree/disagree on category scores AND on autofail judgment, who trends lenient or strict, and what that implies for the rubric or scoring guidance.\n\n"
+        +"RUBRIC:\n"+rubricText+"\n\n"
+        +"TICKETS AND BLIND RE-SCORES (original AI/human scores included ONLY as reference, NOT as ground truth):\n"
+        +JSON.stringify(ticketData,null,2).slice(0,12000)+"\n\n"
+        +"Return ONLY valid JSON (no markdown, no preamble) matching this exact structure:\n"
+        +'{"summary":{"agreementRating":"Strong/Moderate/Weak","overallAssessment":"2-3 sentence overview"},'
+        +'"categoryAgreement":[{"category":"","agreementLevel":"High/Medium/Low","pattern":"description of where auditors align or split","finding":"specific observation with numbers"}],'
+        +'"auditorLean":[{"reviewer":"","tendency":"Lenient/Strict/Consistent","evidence":"specific categories/tickets showing this pattern"}],'
+        +'"autofailAgreement":[{"ticketId":"","agreement":"Unanimous/Split","details":"which auditors flagged it, which did not, and under what condition"}],'
+        +'"highDivergenceTickets":[{"ticketId":"","category":"","scores":"e.g. Jean: YES, Marco: NO","note":"quote or paraphrase the differing justifications and why they diverged"}],'
+        +'"recommendations":[{"area":"rubric wording/scoring context/training","category":"","issue":"","suggestedFix":""}]}';
+
+      var result = await callClaudeInsights(prompt);
+      var clean = result.replace(/```json|```/g,"").trim();
+      var parsed=null;
+      try { parsed=JSON.parse(clean); } catch(e){ var m=clean.match(/\{[\s\S]*\}/); if(m) try { parsed=JSON.parse(m[0]); } catch(e2){} }
+      if(!parsed){ addToast("Could not parse calibration analysis — try again","error"); setTeamCalibRunning(false); setTeamCalibStatus(""); return; }
+      parsed._participantCount = round.participants.length;
+      parsed._ticketCount = Object.keys(byTicket).length;
+      parsed._completedCount = completed.length;
+      parsed._totalAssignments = allReviews.length;
+
+      setTeamCalibStatus("Saving insights...");
+      var chunks = chunkReportContent(JSON.stringify(parsed));
+      var patch = { "Status": {rich_text:[{text:{content:"Complete"}}]}, "Insights Generated At": {rich_text:[{text:{content:new Date().toISOString()}}]} };
+      for(var ci=0; ci<10; ci++) patch["Insights Content "+(ci+1)] = { rich_text:[{text:{content: chunks[ci]||""}}] };
+      await notionAPI("/v1/pages/"+round.pageId,"PATCH",{properties:patch});
+
+      await loadTeamCalibRounds();
+      await openTeamCalibRound(week);
+      addToast("Team calibration analysis complete");
+    } catch(e){ addToast("Calibration failed: "+e.message,"error"); }
+    setTeamCalibRunning(false); setTeamCalibStatus("");
+  }
+
+  function buildTeamCalibDocHTML(week, data) {
+    if(!data) return "";
+    var s=data.summary||{};
+    var agreeColor=s.agreementRating==="Strong"?"#166534":s.agreementRating==="Moderate"?"#92400e":"#991b1b";
+    var agreeBg=s.agreementRating==="Strong"?"#f0fdf4":s.agreementRating==="Moderate"?"#fffbeb":"#fee2e2";
+    function section(title,content){return "<div style=\'margin-bottom:28px;\'><h2 style=\'font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:#6b7280;margin:0 0 12px;\'>"+title+"</h2>"+content+"</div>";}
+    function card(content,border){return "<div style=\'border:1px solid "+(border||"#e5e7eb")+";border-radius:10px;padding:16px 20px;margin-bottom:10px;\'>"+content+"</div>";}
+    function badge(txt,col,bg){return "<span style=\'font-size:10px;font-weight:700;padding:2px 8px;border-radius:10px;background:"+bg+";color:"+col+";border:1px solid "+col+"25;\'>"+txt+"</span>";}
+
+    var catHTML=(data.categoryAgreement||[]).map(function(c){
+      var lvlCol=c.agreementLevel==="High"?"#166534":c.agreementLevel==="Medium"?"#92400e":"#991b1b";
+      var lvlBg=c.agreementLevel==="High"?"#f0fdf4":c.agreementLevel==="Medium"?"#fffbeb":"#fee2e2";
+      return card(
+        "<div style=\'display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;\'><span style=\'font-size:13px;font-weight:700;\'>"+c.category+"</span>"+badge(c.agreementLevel+" agreement",lvlCol,lvlBg)+"</div>"
+        +"<p style=\'font-size:12px;color:#374151;line-height:1.6;margin:0 0 8px;\'>"+c.pattern+"</p>"
+        +"<div style=\'font-size:12px;background:#f9fafb;border-radius:6px;padding:8px 12px;border-left:3px solid #3b82f6;\'>"+c.finding+"</div>"
+      );
+    }).join("");
+    var leanHTML=(data.auditorLean||[]).map(function(a){
+      var col=a.tendency==="Lenient"?"#92400e":a.tendency==="Strict"?"#1d4ed8":"#166534";
+      var bg=a.tendency==="Lenient"?"#fffbeb":a.tendency==="Strict"?"#eff6ff":"#f0fdf4";
+      return card(
+        "<div style=\'display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;\'><span style=\'font-size:13px;font-weight:700;\'>"+a.reviewer+"</span>"+badge(a.tendency,col,bg)+"</div>"
+        +"<p style=\'font-size:12px;color:#374151;line-height:1.6;margin:0;\'>"+a.evidence+"</p>"
+      );
+    }).join("");
+    var divHTML=(data.highDivergenceTickets||[]).map(function(d){
+      return card(
+        "<div style=\'font-size:13px;font-weight:600;margin-bottom:6px;\'>#"+d.ticketId+" &middot; "+d.category+"</div>"
+        +"<p style=\'font-size:12px;color:#374151;margin:0 0 6px;\'><strong>Scores:</strong> "+d.scores+"</p>"
+        +"<p style=\'font-size:12px;color:#6b7280;font-style:italic;margin:0;\'>"+d.note+"</p>"
+      );
+    }).join("");
+    var autofailHTML=(data.autofailAgreement||[]).map(function(af){
+      var col=af.agreement==="Unanimous"?"#166534":"#991b1b";
+      var bg=af.agreement==="Unanimous"?"#f0fdf4":"#fee2e2";
+      return card(
+        "<div style=\'display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;\'><span style=\'font-size:13px;font-weight:700;\'>#"+af.ticketId+"</span>"+badge(af.agreement,col,bg)+"</div>"
+        +"<p style=\'font-size:12px;color:#374151;line-height:1.6;margin:0;\'>"+af.details+"</p>"
+      );
+    }).join("");
+    var recHTML=(data.recommendations||[]).map(function(r){
+      return card(
+        "<div style=\'font-size:13px;font-weight:600;margin-bottom:6px;\'>"+r.area+(r.category?" — "+r.category:"")+"</div>"
+        +"<p style=\'font-size:12px;color:#374151;line-height:1.6;margin:0 0 8px;\'><strong>Issue:</strong> "+r.issue+"</p>"
+        +"<div style=\'font-size:12px;background:#f0fdf4;border-radius:6px;padding:8px 12px;border-left:3px solid #16a34a;\'><span style=\'font-weight:600;color:#166534;\'>Suggested fix: </span>"+r.suggestedFix+"</div>"
+      );
+    }).join("");
+
+    return "<!DOCTYPE html><html><head><meta charset=\'utf-8\'><style>*{box-sizing:border-box;margin:0;padding:0;}body{font-family:Arial,sans-serif;background:white;color:#111827;-webkit-print-color-adjust:exact;}.page{max-width:720px;margin:0 auto;padding:48px 40px 60px;}</style></head><body><div class=\'page\'>"
+      +"<div style=\'padding-bottom:28px;border-bottom:1px solid #e5e7eb;margin-bottom:32px;\'>"
+      +"<div style=\'font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:#6b7280;margin-bottom:6px;\'>Wingman &middot; Team Calibration Report</div>"
+      +"<h1 style=\'font-size:24px;font-weight:700;margin-bottom:4px;\'>"+week+"</h1>"
+      +"<p style=\'font-size:12px;color:#6b7280;margin-bottom:16px;\'>"+(data._completedCount||0)+" of "+(data._totalAssignments||0)+" blind reviews completed &nbsp;&middot;&nbsp; "+(data._ticketCount||0)+" tickets &nbsp;&middot;&nbsp; "+(data._participantCount||0)+" auditors</p>"
+      +"<div style=\'display:inline-flex;align-items:center;gap:10px;padding:10px 16px;background:"+agreeBg+";border-radius:8px;border:1px solid "+agreeColor+"40;\'>"
+      +"<span style=\'font-size:11px;font-weight:700;text-transform:uppercase;color:"+agreeColor+";\'>Agreement: "+s.agreementRating+"</span>"
+      +"<span style=\'font-size:12px;color:#374151;\'>"+s.overallAssessment+"</span></div></div>"
+      +(catHTML?section("Category Agreement",catHTML):"")
+      +(leanHTML?section("Auditor Tendencies",leanHTML):"")
+      +(autofailHTML?section("Autofail Agreement",autofailHTML):"")
+      +(divHTML?section("Highest-Divergence Tickets",divHTML):"")
+      +(recHTML?section("Recommendations",recHTML):"")
+      +"<hr style=\'border:none;border-top:1px solid #e5e7eb;margin:32px 0;\'>"
+      +"<div style=\'font-size:11px;color:#9ca3af;text-align:center;\'>Wingman Team Calibration &nbsp;&middot;&nbsp; "+new Date().toLocaleDateString()+"</div>"
+      +"</div></body></html>";
+  }
+
+  function downloadTeamCalibDoc(week, data) {
+    var html = buildTeamCalibDocHTML(week, data);
+    if(!html) { addToast("No insights to export","error"); return; }
+    downloadBlob(html, "Wingman_TeamCalibration_"+week.replace(/[^a-zA-Z0-9]/g,"_")+".doc", "application/msword");
+  }
+
   async function loadAllData(setup) {
     setLoading(true);
     setSyncStatus("Loading tickets from Notion...");
@@ -4769,6 +5147,7 @@ Rules:
           if(!isEditor&&pair[0]==="manual")return false;
           if(!isEditor&&pair[0]==="fetch")return false;
           if(!isFullAccess&&pair[0]==="calibration")return false;
+          if(!isEditor&&pair[0]==="teamcal")return false;
           if(isViewOnly&&pair[0]==="reports")return false; // View users use My Reports tab
           // My Reports visible to all roles
           return true;
@@ -6876,6 +7255,247 @@ Rules:
               </div>
             );
           })()}
+        </div>
+      )}
+
+      {/* ── TEAM CALIBRATION TAB ── */}
+      {view==="teamcal"&&isEditor&&(
+        <div>
+          <div style={{...card,marginBottom:"16px"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div>
+                <p style={{margin:"0 0 2px",fontSize:"15px",fontWeight:600}}>Team Calibration</p>
+                <p style={{margin:0,fontSize:"12px",color:"var(--color-text-secondary)"}}>Blind inter-rater calibration — how consistently your auditors score the same tickets. Distinct from the AI-vs-dispute Calibration tab.</p>
+              </div>
+              <button onClick={loadTeamCalibRounds} style={{...btnInfo,fontSize:"12px"}}>{teamCalibRoundsLoading?"Loading...":"↺ Refresh"}</button>
+            </div>
+          </div>
+
+          {isFullAccess&&(
+            <div style={{...card,marginBottom:"16px"}}>
+              <p style={{...sectionLabel,marginBottom:"10px"}}>Start New Round</p>
+              {!calibPreview?(
+                <div style={{display:"flex",gap:"10px",alignItems:"flex-end"}}>
+                  <div>
+                    <label style={{...lbl,marginBottom:"4px"}}>Week (any day in the target week)</label>
+                    <input type="date" value={calibSetupWeek} onChange={function(e){setCalibSetupWeek(e.target.value);}} style={{fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+                  </div>
+                  <button onClick={function(){
+                    if(!calibSetupWeek){addToast("Pick a date","error");return;}
+                    var monInst=mnlMondayInstant(new Date(calibSetupWeek+"T00:00:00+08:00").getTime());
+                    generateCalibPreview(mnlWeekLabel(monInst));
+                  }} disabled={calibGenerating} style={btnInfo}>{calibGenerating?"Building...":"Generate Preview"}</button>
+                </div>
+              ):(
+                <div>
+                  <p style={{fontSize:"13px",fontWeight:600,marginBottom:"8px"}}>{calibPreview.week} — {calibPreview.pool.length} ticket{calibPreview.pool.length!==1?"s":""} in the pool · {calibPreview.participants.length} auditor{calibPreview.participants.length!==1?"s":""} will review</p>
+                  {calibPreview.skipped.length>0&&(
+                    <p style={{fontSize:"12px",color:"var(--color-text-warning)",marginBottom:"10px"}}>No reviewed tickets this week for: {calibPreview.skipped.join(", ")} — they'll still review the pool, just won't contribute a ticket to it.</p>
+                  )}
+                  <div style={{border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)",overflow:"hidden",marginBottom:"12px"}}>
+                    {calibPreview.pool.map(function(p,i){
+                      return <div key={p.originalReviewerEmail} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 12px",borderBottom:i<calibPreview.pool.length-1?"0.5px solid var(--color-border-tertiary)":"none"}}>
+                        <div>
+                          <span style={{fontSize:"12px",fontWeight:600}}>#{p.ticketId}</span>
+                          <span style={{fontSize:"12px",color:"var(--color-text-secondary)"}}> · {p.agentName} · {p.contactReason} · originally reviewed by {p.originalReviewerName}</span>
+                        </div>
+                        {p.candidateIds.length>1&&<button onClick={function(){rerollCalibPick(i);}} style={{...ghost,fontSize:"11px",padding:"2px 8px"}}>Re-roll ({p.candidateIdx+1}/{p.candidateIds.length})</button>}
+                      </div>;
+                    })}
+                  </div>
+                  <div style={{display:"flex",gap:"8px"}}>
+                    <button onClick={confirmCalibRound} disabled={calibConfirming} style={btnSuccess}>{calibConfirming?"Creating...":"Confirm & Assign"}</button>
+                    <button onClick={function(){setCalibPreview(null);}} style={ghost}>Cancel</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          <div style={{...card,marginBottom:"16px"}}>
+            <p style={{...sectionLabel,marginBottom:"10px"}}>Rounds</p>
+            {!teamCalibRoundsLoaded?(
+              <p style={{fontSize:"13px",color:"var(--color-text-secondary)"}}>Click Refresh to load past rounds.</p>
+            ):teamCalibRounds.length===0?(
+              <p style={{fontSize:"13px",color:"var(--color-text-secondary)"}}>No calibration rounds yet.</p>
+            ):(
+              <div style={{border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)",overflow:"hidden"}}>
+                {teamCalibRounds.map(function(r,i){
+                  return <div key={r.pageId} onClick={function(){openTeamCalibRound(r.week);}} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 12px",borderBottom:i<teamCalibRounds.length-1?"0.5px solid var(--color-border-tertiary)":"none",cursor:"pointer",background:activeTeamCalibWeek===r.week?"var(--color-background-info)":"transparent"}}>
+                    <span style={{fontSize:"13px",fontWeight:500}}>{r.week}</span>
+                    <span style={{fontSize:"12px",color:"var(--color-text-secondary)"}}>{r.poolCount} ticket{r.poolCount!==1?"s":""} · {r.participants.length} auditors · {r.status}{r.insightsGeneratedAt?" ✓ insights":""}</span>
+                  </div>;
+                })}
+              </div>
+            )}
+          </div>
+
+          {teamCalibDetailLoading&&<p style={{fontSize:"13px",color:"var(--color-text-secondary)"}}>Loading round...</p>}
+
+          {teamCalibDetail&&(
+            <div>
+              <div style={{...card,marginBottom:"16px"}}>
+                <p style={{...sectionLabel,marginBottom:"10px"}}>My Calibration Queue — {teamCalibDetail.week}</p>
+                {myCalibAssignments.length===0?(
+                  <p style={{fontSize:"13px",color:"var(--color-text-secondary)"}}>No tickets assigned to you for this round.</p>
+                ):(
+                  <div>
+                    <p style={{fontSize:"12px",color:"var(--color-text-secondary)",marginBottom:"10px"}}>{myCalibAssignments.filter(function(a){return a.status==="Complete";}).length} of {myCalibAssignments.length} complete</p>
+                    <div style={{border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)",overflow:"hidden"}}>
+                      {myCalibAssignments.map(function(a,i){
+                        return <div key={a.pageId} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 12px",borderBottom:i<myCalibAssignments.length-1?"0.5px solid var(--color-border-tertiary)":"none"}}>
+                          <span style={{fontSize:"13px"}}>#{a.ticketId}</span>
+                          <div style={{display:"flex",alignItems:"center",gap:"8px"}}>
+                            <span style={{fontSize:"11px",fontWeight:600,padding:"2px 8px",borderRadius:"10px",background:a.status==="Complete"?"var(--color-background-success)":"var(--color-background-secondary)",color:a.status==="Complete"?"var(--color-text-success)":"var(--color-text-secondary)"}}>{a.status}</span>
+                            <button onClick={function(){startCalibScoring(a);}} style={{...ghost,fontSize:"11px",padding:"3px 10px"}}>{a.status==="Complete"?"Edit":"Score"}</button>
+                          </div>
+                        </div>;
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {isFullAccess&&(
+                <div style={{...card,marginBottom:"16px"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                    <p style={{...sectionLabel,margin:0}}>Calibrate</p>
+                    <button onClick={function(){
+                      if(window.confirm("Run calibration analysis now? This uses whatever reviews are currently complete — an incomplete round will produce a partial picture.")){
+                        runTeamCalibration(teamCalibDetail.week);
+                      }
+                    }} disabled={teamCalibRunning} style={btnSuccess}>{teamCalibRunning?(teamCalibStatus||"Running..."):"Calibrate"}</button>
+                  </div>
+                </div>
+              )}
+
+              {teamCalibDetail.insights&&(
+                <div style={{...card,marginBottom:"16px"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"12px"}}>
+                    <p style={{...sectionLabel,margin:0}}>Insights</p>
+                    <button onClick={function(){downloadTeamCalibDoc(teamCalibDetail.week, teamCalibDetail.insights);}} style={{...ghost,fontSize:"12px"}}>Export to Doc</button>
+                  </div>
+                  <div style={{marginBottom:"14px"}}>
+                    <span style={{fontSize:"11px",fontWeight:700,textTransform:"uppercase",padding:"3px 10px",borderRadius:"10px",background:"var(--color-background-secondary)"}}>{teamCalibDetail.insights.summary&&teamCalibDetail.insights.summary.agreementRating} agreement</span>
+                    <p style={{fontSize:"13px",color:"var(--color-text-primary)",marginTop:"8px"}}>{teamCalibDetail.insights.summary&&teamCalibDetail.insights.summary.overallAssessment}</p>
+                  </div>
+                  {(teamCalibDetail.insights.categoryAgreement||[]).length>0&&(
+                    <div style={{marginBottom:"14px"}}>
+                      <p style={{fontSize:"12px",fontWeight:600,marginBottom:"6px"}}>Category Agreement</p>
+                      {teamCalibDetail.insights.categoryAgreement.map(function(c,i){
+                        return <div key={i} style={{padding:"8px 0",borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
+                          <div style={{display:"flex",justifyContent:"space-between"}}><span style={{fontSize:"12px",fontWeight:600}}>{c.category}</span><span style={{fontSize:"11px",color:"var(--color-text-secondary)"}}>{c.agreementLevel}</span></div>
+                          <p style={{fontSize:"12px",color:"var(--color-text-secondary)",margin:"4px 0 0"}}>{c.finding}</p>
+                        </div>;
+                      })}
+                    </div>
+                  )}
+                  {(teamCalibDetail.insights.auditorLean||[]).length>0&&(
+                    <div style={{marginBottom:"14px"}}>
+                      <p style={{fontSize:"12px",fontWeight:600,marginBottom:"6px"}}>Auditor Tendencies</p>
+                      {teamCalibDetail.insights.auditorLean.map(function(a,i){
+                        return <div key={i} style={{padding:"8px 0",borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
+                          <div style={{display:"flex",justifyContent:"space-between"}}><span style={{fontSize:"12px",fontWeight:600}}>{a.reviewer}</span><span style={{fontSize:"11px",color:"var(--color-text-secondary)"}}>{a.tendency}</span></div>
+                          <p style={{fontSize:"12px",color:"var(--color-text-secondary)",margin:"4px 0 0"}}>{a.evidence}</p>
+                        </div>;
+                      })}
+                    </div>
+                  )}
+                  {(teamCalibDetail.insights.autofailAgreement||[]).length>0&&(
+                    <div style={{marginBottom:"14px"}}>
+                      <p style={{fontSize:"12px",fontWeight:600,marginBottom:"6px"}}>Autofail Agreement</p>
+                      {teamCalibDetail.insights.autofailAgreement.map(function(af,i){
+                        return <div key={i} style={{padding:"8px 0",borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
+                          <div style={{display:"flex",justifyContent:"space-between"}}><span style={{fontSize:"12px",fontWeight:600}}>#{af.ticketId}</span><span style={{fontSize:"11px",color:af.agreement==="Unanimous"?"var(--color-text-success)":"var(--color-text-warning)"}}>{af.agreement}</span></div>
+                          <p style={{fontSize:"12px",color:"var(--color-text-secondary)",margin:"4px 0 0"}}>{af.details}</p>
+                        </div>;
+                      })}
+                    </div>
+                  )}
+                  {(teamCalibDetail.insights.highDivergenceTickets||[]).length>0&&(
+                    <div style={{marginBottom:"14px"}}>
+                      <p style={{fontSize:"12px",fontWeight:600,marginBottom:"6px"}}>Highest-Divergence Tickets</p>
+                      {teamCalibDetail.insights.highDivergenceTickets.map(function(d,i){
+                        return <div key={i} style={{padding:"8px 0",borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
+                          <p style={{fontSize:"12px",fontWeight:600,margin:"0 0 2px"}}>#{d.ticketId} · {d.category}</p>
+                          <p style={{fontSize:"12px",color:"var(--color-text-secondary)",margin:"0 0 2px"}}>{d.scores}</p>
+                          <p style={{fontSize:"12px",color:"var(--color-text-secondary)",fontStyle:"italic",margin:0}}>{d.note}</p>
+                        </div>;
+                      })}
+                    </div>
+                  )}
+                  {(teamCalibDetail.insights.recommendations||[]).length>0&&(
+                    <div>
+                      <p style={{fontSize:"12px",fontWeight:600,marginBottom:"6px"}}>Recommendations</p>
+                      {teamCalibDetail.insights.recommendations.map(function(r,i){
+                        return <div key={i} style={{padding:"8px 0",borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
+                          <p style={{fontSize:"12px",fontWeight:600,margin:"0 0 2px"}}>{r.area}{r.category?" — "+r.category:""}</p>
+                          <p style={{fontSize:"12px",color:"var(--color-text-secondary)",margin:"0 0 2px"}}><strong>Issue:</strong> {r.issue}</p>
+                          <p style={{fontSize:"12px",color:"var(--color-text-secondary)",margin:0}}><strong>Fix:</strong> {r.suggestedFix}</p>
+                        </div>;
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Blind scoring modal */}
+          {calibScoringAssignment&&calibScoringTicket&&(
+            <div style={{position:"fixed",inset:0,zIndex:1000,display:"flex",justifyContent:"center",alignItems:"flex-start",padding:"40px 20px",background:"rgba(0,0,0,0.4)",overflowY:"auto"}} onClick={function(e){if(e.target===e.currentTarget){setCalibScoringAssignment(null);setCalibScoringTicket(null);}}}>
+              <div style={{background:"var(--color-background-primary)",borderRadius:"var(--border-radius-lg)",maxWidth:"720px",width:"100%",padding:"24px",maxHeight:"90vh",overflowY:"auto"}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"14px"}}>
+                  <div>
+                    <p style={{margin:"0 0 2px",fontSize:"15px",fontWeight:600}}>Blind Score — #{calibScoringTicket.ticketId}</p>
+                    <p style={{margin:0,fontSize:"12px",color:"var(--color-text-secondary)"}}>{calibScoringTicket.agentName} · {calibScoringTicket.contactReason}</p>
+                  </div>
+                  <button onClick={function(){setCalibScoringAssignment(null);setCalibScoringTicket(null);}} style={{...ghost,fontSize:"12px"}}>Close</button>
+                </div>
+                <div style={{padding:"8px 12px",background:"var(--color-background-info)",border:"0.5px solid var(--color-border-info)",borderRadius:"var(--border-radius-md)",fontSize:"11px",color:"var(--color-text-info)",marginBottom:"14px"}}>
+                  This is a blind calibration review — you won't see the AI's score, the original auditor's score, or any other auditor's score until the round's insights are generated.
+                </div>
+                {calibScoringTicket.transcript&&(
+                  <div style={{...card,marginBottom:"14px"}}>
+                    <p style={{...sectionLabel,marginBottom:"8px"}}>Transcript</p>
+                    <div style={{fontSize:"12px",lineHeight:"1.8",color:"var(--color-text-secondary)",maxHeight:"260px",overflowY:"auto"}}>
+                      {calibScoringTicket.transcript.split(" | ").map(function(line,i){
+                        var isAgent=line.startsWith("[Agent");
+                        return <div key={i} style={{padding:"6px 10px",borderRadius:"var(--border-radius-md)",marginBottom:"4px",background:isAgent?"var(--color-background-secondary)":"var(--color-background-info)",color:isAgent?"var(--color-text-primary)":"var(--color-text-info)"}}>{line}</div>;
+                      })}
+                    </div>
+                  </div>
+                )}
+                {matrix.map(function(c){
+                  var draft = calibScoringDraft[c.id]||{level:"",justification:""};
+                  return <div key={c.id} style={{...card,marginBottom:"12px"}}>
+                    <p style={{fontSize:"13px",fontWeight:600,marginBottom:"6px"}}>{c.label}</p>
+                    <select value={draft.level} onChange={function(e){updateCalibDraft(c.id,"level",e.target.value);}} style={{fontSize:"12px",padding:"5px 8px",width:"100%",marginBottom:"8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}>
+                      <option value="">Select...</option>
+                      {c.levels.map(function(l){var opt=l.points!==null?l.level+" ("+l.points+")":l.level;return <option key={l.level} value={opt}>{opt}</option>;})}
+                    </select>
+                    <textarea placeholder="Justification (optional, but this is what the calibration analysis reads)" value={draft.justification} onChange={function(e){updateCalibDraft(c.id,"justification",e.target.value);}} style={{width:"100%",boxSizing:"border-box",height:"50px",resize:"vertical",fontFamily:"inherit",fontSize:"12px",lineHeight:"1.5",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+                  </div>;
+                })}
+                {(function(){
+                  var afDraft = calibScoringDraft._autofail||{flagged:false,condition:""};
+                  return <div style={{...card,marginBottom:"12px",borderColor:afDraft.flagged?"var(--color-border-warning)":undefined}}>
+                    <label style={{display:"flex",alignItems:"center",gap:"8px",fontSize:"13px",fontWeight:600,cursor:"pointer",marginBottom:afDraft.flagged?"8px":0}}>
+                      <input type="checkbox" checked={!!afDraft.flagged} onChange={function(e){updateCalibDraft("_autofail","flagged",e.target.checked);}}/>
+                      Flag as autofail
+                    </label>
+                    {afDraft.flagged&&(
+                      <select value={afDraft.condition} onChange={function(e){updateCalibDraft("_autofail","condition",e.target.value);}} style={{fontSize:"12px",padding:"5px 8px",width:"100%",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}>
+                        <option value="">Which condition applies?</option>
+                        {autofailList.map(function(cond){return <option key={cond} value={cond}>{cond}</option>;})}
+                      </select>
+                    )}
+                  </div>;
+                })()}
+                <button onClick={submitCalibReview} disabled={calibSubmitting} style={{...btnSuccess,width:"100%"}}>{calibSubmitting?"Submitting...":"Submit Blind Review"}</button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
