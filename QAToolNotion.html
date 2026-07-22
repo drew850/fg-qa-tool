@@ -2,10 +2,15 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.86
+  Version:  2.0.87
   Date:     2026-06-09
 
   Changelog:
+  v2.0.87 (2026-07-13) -- Team Calibration: wire in real DB IDs + fix Notion 2000-char field overflow
+    - CALIB_ROUNDS_DB_ID / CALIB_REVIEWS_DB_ID now point at the real "Team Calibration Rounds" / "Team Calibration Reviews" databases.
+    - Fix: confirmCalibRound() was saving candidateIds/candidateIdx (every ticket an auditor reviewed that week, kept only for the pre-confirm re-roll button) into the Pool rich_text field. With any real team size this pushed past Notion's 2000-char-per-rich_text-block limit ("Pool.rich_text[0].text.content.length ... instead was 2997") and the round never got created. Those fields are pre-confirm-only (never read from the persisted round), so they're now stripped before the Notion write.
+    - Added a pre-flight length check on Participants/Pool before writing, and the same check on Notes when submitting a blind review (free-text justifications across 8 categories can independently hit the same 2000-char ceiling) — both now fail with a clear, specific message instead of a cryptic Notion 400.
+
   v2.0.86 (2026-07-13) -- New feature: Team Calibration (blind human inter-rater calibration)
     - New "Team Calibration" tab, visible to Edit/Full, hidden from View/Agent. Distinct from the existing AI-vs-dispute "Calibration" tab — this measures auditor-vs-auditor agreement.
     - Setup (Full-only): pick a week, generates a pool of one ticket per active auditor who reviewed at least one ticket that week (auditors with zero reviewed tickets that week are skipped from the pool but still participate as reviewers, with a re-roll option per pool ticket before confirming.
@@ -706,7 +711,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 // The Python /proxy injects them server-side based on destination host.
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.86";
+const APP_VERSION = "v2.0.87";
 // ── Debug log buffer ─────────────────────────────────────────────────────────
 // Ring buffer of recent events + uncaught errors, so user-reported issues can be
 // traced. Export via the Settings tab button or exportWingmanLog() in the console.
@@ -4455,11 +4460,23 @@ Rules:
     try {
       var week = calibPreview.week;
       var nowIso = new Date().toISOString();
+      // Strip candidateIds/candidateIdx before persisting — those are only needed for the
+      // pre-confirm re-roll UI (calibPreview, client-side only) and bloat the stored JSON
+      // well past Notion's 2000-char-per-rich_text-block limit once a team has any real size.
+      var poolForStorage = calibPreview.pool.map(function(p){
+        return { ticketId: p.ticketId, agentName: p.agentName, contactReason: p.contactReason, originalReviewerName: p.originalReviewerName, originalReviewerEmail: p.originalReviewerEmail };
+      });
+      var participantsJSON = JSON.stringify(calibPreview.participants);
+      var poolJSON = JSON.stringify(poolForStorage);
+      if(participantsJSON.length>1990 || poolJSON.length>1990){
+        addToast("Round data too large for a single Notion field ("+Math.max(participantsJSON.length,poolJSON.length)+" chars) — this round has more auditors/tickets than the current schema supports. Tell Claude so Participants/Pool can be chunked like Insights Content is.","error");
+        setCalibConfirming(false); return;
+      }
       var roundProps = {
         "Week": { title: [{ text: { content: week } }] },
         "Status": { rich_text: [{ text: { content: "In Progress" } }] },
-        "Participants": { rich_text: [{ text: { content: JSON.stringify(calibPreview.participants) } }] },
-        "Pool": { rich_text: [{ text: { content: JSON.stringify(calibPreview.pool) } }] },
+        "Participants": { rich_text: [{ text: { content: participantsJSON } }] },
+        "Pool": { rich_text: [{ text: { content: poolJSON } }] },
         "Created At": { rich_text: [{ text: { content: nowIso } }] },
         "Created By": { rich_text: [{ text: { content: currentUser.name } }] }
       };
@@ -4581,10 +4598,15 @@ Rules:
       var scores={}, notes={};
       matrix.forEach(function(c){ scores[c.id]=calibScoringDraft[c.id].level; notes[c.id]=calibScoringDraft[c.id].justification||""; });
       notes._autofail = autofailDraft.flagged ? autofailDraft.condition : "";
+      var scoresJSON = JSON.stringify(scores), notesJSON = JSON.stringify(notes);
+      if(notesJSON.length>1990){
+        addToast("Justifications are too long to save all at once ("+notesJSON.length+" chars, limit ~1990) — trim one or two notes and try again","error");
+        setCalibSubmitting(false); return;
+      }
       var patch = {
         "Status": { rich_text:[{text:{content:"Complete"}}] },
-        "Scores": { rich_text:[{text:{content: JSON.stringify(scores)}}] },
-        "Notes": { rich_text:[{text:{content: JSON.stringify(notes)}}] },
+        "Scores": { rich_text:[{text:{content: scoresJSON}}] },
+        "Notes": { rich_text:[{text:{content: notesJSON}}] },
         "Autofail": { checkbox: !!autofailDraft.flagged },
         "Submitted At": { rich_text:[{text:{content: new Date().toISOString()}}] }
       };
