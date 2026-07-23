@@ -2,10 +2,13 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.88
+  Version:  2.0.89
   Date:     2026-06-09
 
   Changelog:
+  v2.0.89 (2026-07-13) -- Fix: Round Status grid showed headers but no ticket rows
+    - loadTeamCalibRounds() was parsing the Pool JSON only to compute poolCount, but never stored the actual pool array on the round object — so teamCalibDetail.pool was always undefined when the Round Status grid tried to render rows from it. My Calibration Queue worked fine because it loads from a separate query, which masked this. Fixed by storing the parsed pool array alongside poolCount.
+
   v2.0.88 (2026-07-13) -- Team Calibration: Round Status grid for Full-access users
     - New "Round Status — all auditors" table, Full-access only, shown between My Calibration Queue and Calibrate. Rows are the round's pool tickets, columns are every participating auditor, cells show Complete/Pending for that auditor's blind review of that ticket (dash = the ticket's own original reviewer, who never self-reviews).
     - Loaded via a new query in openTeamCalibRound (Full-access only) that pulls every assignment in the round, not just the current user's — kept separate from what feeds Calibrate itself, so opening a round to check status doesn't require running the analysis.
@@ -715,7 +718,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 // The Python /proxy injects them server-side based on destination host.
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.88";
+const APP_VERSION = "v2.0.89";
 // ── Debug log buffer ─────────────────────────────────────────────────────────
 // Ring buffer of recent events + uncaught errors, so user-reported issues can be
 // traced. Export via the Settings tab button or exportWingmanLog() in the console.
@@ -4527,7 +4530,7 @@ Rules:
           rounds.push({
             pageId: page.id, week: getProp(page,"Week")||"", status: getProp(page,"Status")||"Setup",
             participants: tryParseJSON(getProp(page,"Participants")||"[]")||[],
-            poolCount: pool.length, createdAt: getProp(page,"Created At")||"", createdBy: getProp(page,"Created By")||"",
+            pool: pool, poolCount: pool.length, createdAt: getProp(page,"Created At")||"", createdBy: getProp(page,"Created By")||"",
             insightsGeneratedAt: getProp(page,"Insights Generated At")||""
           });
         });
