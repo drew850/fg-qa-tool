@@ -2,10 +2,14 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.87
+  Version:  2.0.88
   Date:     2026-06-09
 
   Changelog:
+  v2.0.88 (2026-07-13) -- Team Calibration: Round Status grid for Full-access users
+    - New "Round Status — all auditors" table, Full-access only, shown between My Calibration Queue and Calibrate. Rows are the round's pool tickets, columns are every participating auditor, cells show Complete/Pending for that auditor's blind review of that ticket (dash = the ticket's own original reviewer, who never self-reviews).
+    - Loaded via a new query in openTeamCalibRound (Full-access only) that pulls every assignment in the round, not just the current user's — kept separate from what feeds Calibrate itself, so opening a round to check status doesn't require running the analysis.
+
   v2.0.87 (2026-07-13) -- Team Calibration: wire in real DB IDs + fix Notion 2000-char field overflow
     - CALIB_ROUNDS_DB_ID / CALIB_REVIEWS_DB_ID now point at the real "Team Calibration Rounds" / "Team Calibration Reviews" databases.
     - Fix: confirmCalibRound() was saving candidateIds/candidateIdx (every ticket an auditor reviewed that week, kept only for the pre-confirm re-roll button) into the Pool rich_text field. With any real team size this pushed past Notion's 2000-char-per-rich_text-block limit ("Pool.rich_text[0].text.content.length ... instead was 2997") and the round never got created. Those fields are pre-confirm-only (never read from the persisted round), so they're now stripped before the Notion write.
@@ -711,7 +715,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 // The Python /proxy injects them server-side based on destination host.
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.87";
+const APP_VERSION = "v2.0.88";
 // ── Debug log buffer ─────────────────────────────────────────────────────────
 // Ring buffer of recent events + uncaught errors, so user-reported issues can be
 // traced. Export via the Settings tab button or exportWingmanLog() in the console.
@@ -1719,6 +1723,7 @@ function App() {
   const [teamCalibDetail,setTeamCalibDetail]=useState(null);         // full detail of the open round
   const [teamCalibDetailLoading,setTeamCalibDetailLoading]=useState(false);
   const [myCalibAssignments,setMyCalibAssignments]=useState([]);     // this user's assignments for the open round
+  const [allRoundAssignments,setAllRoundAssignments]=useState([]);   // every assignment in the open round (Full-access only, for the status grid)
   const [calibSetupWeek,setCalibSetupWeek]=useState("");
   const [calibPreview,setCalibPreview]=useState(null);               // {week, pool:[], participants:[], skipped:[]}
   const [calibGenerating,setCalibGenerating]=useState(false);
@@ -4565,6 +4570,25 @@ Rules:
         hasMore=data.has_more||false; cursor=data.next_cursor;
       }
       setMyCalibAssignments(mine);
+
+      if(isFullAccess){
+        var all=[]; var cursor2=undefined, hasMore2=true;
+        while(hasMore2){
+          var body2={page_size:100, filter:{property:"Week", rich_text:{equals:week}}};
+          if(cursor2) body2.start_cursor=cursor2;
+          var data2 = await notionAPI("/v1/databases/"+CALIB_REVIEWS_DB_ID+"/query","POST",body2);
+          (data2.results||[]).forEach(function(page){
+            all.push({
+              ticketId: getProp(page,"Ticket ID")||"", reviewerName: getProp(page,"Reviewer Name")||"",
+              reviewerEmail: getProp(page,"Reviewer Email")||"", status: getProp(page,"Status")||"Pending"
+            });
+          });
+          hasMore2=data2.has_more||false; cursor2=data2.next_cursor;
+        }
+        setAllRoundAssignments(all);
+      } else {
+        setAllRoundAssignments([]);
+      }
     } catch(e){ addToast("Failed to open round: "+e.message,"error"); }
     setTeamCalibDetailLoading(false);
   }
@@ -7377,6 +7401,42 @@ Rules:
                   </div>
                 )}
               </div>
+
+              {isFullAccess&&(
+                <div style={{...card,marginBottom:"16px"}}>
+                  <p style={{...sectionLabel,marginBottom:"10px"}}>Round Status — all auditors</p>
+                  <p style={{fontSize:"12px",color:"var(--color-text-secondary)",marginBottom:"10px"}}>{allRoundAssignments.filter(function(a){return a.status==="Complete";}).length} of {allRoundAssignments.length} reviews complete</p>
+                  <div style={{overflowX:"auto"}}>
+                    <table style={{borderCollapse:"collapse",width:"100%",minWidth:(120+(teamCalibDetail.participants||[]).length*90)+"px"}}>
+                      <thead>
+                        <tr>
+                          <th style={{textAlign:"left",padding:"6px 8px",fontSize:"11px",color:"var(--color-text-secondary)",fontWeight:600,borderBottom:"0.5px solid var(--color-border-tertiary)",position:"sticky",left:0,background:"var(--color-background-primary)"}}>Ticket</th>
+                          {(teamCalibDetail.participants||[]).map(function(p){
+                            return <th key={p.email} style={{textAlign:"center",padding:"6px 8px",fontSize:"11px",color:"var(--color-text-secondary)",fontWeight:600,borderBottom:"0.5px solid var(--color-border-tertiary)",whiteSpace:"nowrap"}}>{p.name}</th>;
+                          })}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(teamCalibDetail.pool||[]).map(function(t){
+                          return <tr key={t.ticketId}>
+                            <td style={{padding:"6px 8px",fontSize:"12px",fontWeight:600,borderBottom:"0.5px solid var(--color-border-tertiary)",whiteSpace:"nowrap",position:"sticky",left:0,background:"var(--color-background-primary)"}}>#{t.ticketId}</td>
+                            {(teamCalibDetail.participants||[]).map(function(p){
+                              if(p.email===t.originalReviewerEmail){
+                                return <td key={p.email} title="No self-review" style={{textAlign:"center",padding:"6px 8px",fontSize:"12px",color:"var(--color-text-secondary)",borderBottom:"0.5px solid var(--color-border-tertiary)"}}>—</td>;
+                              }
+                              var a = allRoundAssignments.find(function(x){return String(x.ticketId)===String(t.ticketId)&&x.reviewerEmail===p.email;});
+                              var status = a?a.status:"Pending";
+                              return <td key={p.email} style={{textAlign:"center",padding:"6px 8px",borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
+                                <span style={{fontSize:"11px",fontWeight:600,padding:"2px 8px",borderRadius:"10px",background:status==="Complete"?"var(--color-background-success)":"var(--color-background-secondary)",color:status==="Complete"?"var(--color-text-success)":"var(--color-text-secondary)"}}>{status==="Complete"?"✓":"Pending"}</span>
+                              </td>;
+                            })}
+                          </tr>;
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
 
               {isFullAccess&&(
                 <div style={{...card,marginBottom:"16px"}}>
