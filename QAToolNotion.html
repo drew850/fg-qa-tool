@@ -2,10 +2,18 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.89
+  Version:  2.0.90
   Date:     2026-06-09
 
   Changelog:
+  v2.0.90 (2026-07-27) -- New feature: audited tickets lock on the Wednesday of the following week
+    - Lock date = Wednesday of the week following the Manila week containing reviewedAt (the human audit-completion timestamp) — NOT the ticket's created-date week, since those can drift apart (backlogs, late catch-up audits, re-audits). A ticket with no reviewedAt yet is never locked. Formula: mnlMondayInstant(reviewedAt) + 9 days.
+    - Once locked: no new agent disputes (saveAgentDispute), no auditor direct override (saveDispute), no Re-audit, no Delete & Replace, no Mark/Remove autofail.
+    - Deliberately NOT gated: saveDisputeApproval (resolving an already-filed dispute — by construction it was filed before the lock, so it always resolves normally) and recalcFinalPassed (the admin drift-repair tool — fixes bugs, not scores).
+    - Full-access users get an explicit "🔓 Unlock" action on a locked ticket (reason required) — logged (who/when/why) via 4 new fields, not a silent bypass. Persists once set; no separate re-lock action in this version.
+    - UI: lock banner + inline unlock control in the ticket detail view, an "Unlocked by X — reason" banner when an override is active, and a 🔒 icon next to the ticket ID in the Review tab list.
+    - REQUIRES SETUP: 4 new properties on the existing QA Audits database — Unlocked Override (Checkbox), Unlocked By, Unlocked At, Unlock Reason (all Text). Nothing else in that DB changes.
+
   v2.0.89 (2026-07-13) -- Fix: Round Status grid showed headers but no ticket rows
     - loadTeamCalibRounds() was parsing the Pool JSON only to compute poolCount, but never stored the actual pool array on the round object — so teamCalibDetail.pool was always undefined when the Round Status grid tried to render rows from it. My Calibration Queue worked fine because it loads from a separate query, which masked this. Fixed by storing the parsed pool array alongside poolCount.
 
@@ -718,7 +726,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 // The Python /proxy injects them server-side based on destination host.
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.89";
+const APP_VERSION = "v2.0.90";
 // ── Debug log buffer ─────────────────────────────────────────────────────────
 // Ring buffer of recent events + uncaught errors, so user-reported issues can be
 // traced. Export via the Settings tab button or exportWingmanLog() in the console.
@@ -941,6 +949,8 @@ async function loadTicketsFromNotion(dbId, onStatus) {
     autofailManual:page.properties&&page.properties["Autofail Manual"]&&page.properties["Autofail Manual"].checkbox||false,
     messageCount:  page.properties&&page.properties["Message Count"]&&page.properties["Message Count"].number||null,
     reauditHistory: getProp(page,"Reaudit History")||"[]",
+    unlockedOverride: page.properties&&page.properties["Unlocked Override"]&&page.properties["Unlocked Override"].checkbox||false,
+    unlockedBy: getProp(page,"Unlocked By")||"", unlockedAt: getProp(page,"Unlocked At")||"", unlockReason: getProp(page,"Unlock Reason")||"",
   }));
 }
 
@@ -1210,7 +1220,11 @@ function parseNotionRow(r) {
       try { return JSON.parse(r.reauditHistory || r["Reaudit History"] || "[]"); } catch(e){ return []; }
     })(),
     deleted: r.deleted || false,
-    deletedBy: r.deletedBy || "", deletedAt: r.deletedAt || "", deleteReason: r.deleteReason || ""
+    deletedBy: r.deletedBy || "", deletedAt: r.deletedAt || "", deleteReason: r.deleteReason || "",
+    unlockedOverride: !!(r.unlockedOverride ?? r["Unlocked Override"] ?? false),
+    unlockedBy: r.unlockedBy || r["Unlocked By"] || "",
+    unlockedAt: r.unlockedAt || r["Unlocked At"] || "",
+    unlockReason: r.unlockReason || r["Unlock Reason"] || ""
   };
 }
 
@@ -1370,6 +1384,31 @@ function getWeek() {
 function ticketWeekLabel(createdDate) {
   if (!createdDate) return "";
   return mnlWeekLabel(mnlMondayInstant(createdDate));
+}
+
+// Locking: a ticket locks on the Wednesday of the week FOLLOWING the Manila week its
+// human review (reviewedAt) fell in — not the week it was created. E.g. reviewed sometime
+// in the week of Jul 20-26 -> following week is Jul 27-Aug 2 -> Wednesday of that = Jul 29.
+// That's mnlMondayInstant(reviewedAt) + 9 days (7 to next Monday, +2 to Wednesday).
+function ticketLockInstant(reviewedAt) {
+  if(!reviewedAt) return null;
+  var reviewMon = mnlMondayInstant(reviewedAt);
+  if(reviewMon==null) return null;
+  return reviewMon + 9*86400000;
+}
+// A ticket is never locked until it's been human-reviewed at least once (no reviewedAt = no lock),
+// and a Full-access unlock override always wins regardless of date.
+function isTicketLocked(t) {
+  if(!t || !t.reviewedAt || t.unlockedOverride) return false;
+  var lockInstant = ticketLockInstant(t.reviewedAt);
+  if(lockInstant==null) return false;
+  return Date.now() >= lockInstant;
+}
+function ticketLockDateLabel(t) {
+  var lockInstant = ticketLockInstant(t&&t.reviewedAt);
+  if(lockInstant==null) return "";
+  var d = new Date(lockInstant + MNL_MS);
+  return _mnlFmt(lockInstant) + " " + d.getUTCFullYear();
 }
 
 // Parse a week label ("Jun 9 - Jun 15 2026") into a sortable timestamp (start of week).
@@ -1759,6 +1798,9 @@ function App() {
   const [savingAutofail,setSavingAutofail]=useState(false);
   const [removeAutofailPrompt,setRemoveAutofailPrompt]=useState(false);
   const [removeAutofailReason,setRemoveAutofailReason]=useState("");
+  const [unlockPrompt,setUnlockPrompt]=useState(false);
+  const [unlockReasonInput,setUnlockReasonInput]=useState("");
+  const [unlockingTicket,setUnlockingTicket]=useState(false);
 
   // Delete & Replace modal state
   const [deleteModal,setDeleteModal]=useState(null);
@@ -2190,6 +2232,7 @@ function App() {
 
   function handleReauditClick(ticket) {
     console.log("[Reaudit][0] Re-audit clicked for ticket #"+ticket.ticketId);
+    if(isTicketLocked(ticket)) { addToast("This ticket is locked ("+ticketLockDateLabel(ticket)+") — a Full-access user must unlock it first","error"); return; }
     // No pre-check on messageCount — missing count treated as 0, new message check handles it downstream
     setReauditModal({step:"confirm", ticket, newMsgCount:null, error:""});
   }
@@ -2329,6 +2372,7 @@ function App() {
 
   function handleDeleteClick(ticket) {
     console.log("[Replace][0] Delete clicked for ticket #"+ticket.ticketId);
+    if(isTicketLocked(ticket)) { addToast("This ticket is locked ("+ticketLockDateLabel(ticket)+") — a Full-access user must unlock it first","error"); return; }
     setDeleteModal({ step:"intent", ticket, minMsg:4, replacement:null, error:"" });
   }
 
@@ -3572,6 +3616,7 @@ Rules:
   // ── MANUAL AUTOFAIL ──────────────────────────────────────────────────────────
   async function saveManualAutofail(ticket, condition) {
     if(!condition) { addToast("Please select an autofail condition","error"); return; }
+    if(isTicketLocked(ticket)) { addToast("This ticket is locked ("+ticketLockDateLabel(ticket)+") — a Full-access user must unlock it first","error"); return; }
     if(!ticket.notionPageId) { addToast("This ticket has no saved Notion record yet — Sync Notion and reopen it first.","error"); return; }
     setSavingAutofail(true);
     try {
@@ -3594,6 +3639,7 @@ Rules:
 
   async function removeManualAutofail(ticket, reason) {
     if(!reason||!reason.trim()) { addToast("Please enter a justification","error"); return; }
+    if(isTicketLocked(ticket)) { addToast("This ticket is locked ("+ticketLockDateLabel(ticket)+") — a Full-access user must unlock it first","error"); return; }
     if(!ticket.notionPageId) { addToast("This ticket has no saved Notion record yet — Sync Notion and reopen it first.","error"); return; }
     setSavingAutofail(true);
     try {
@@ -3611,6 +3657,32 @@ Rules:
       addToast("Autofail removed");
     } catch(e){addToast("Save failed: "+e.message,"error");}
     setSavingAutofail(false);
+  }
+
+  // ── UNLOCK OVERRIDE (Full-access only) ───────────────────────────────────────
+  // A deliberate, logged exception to the Wednesday-lock — not a silent bypass.
+  // Persists once set; there's no separate "re-lock" action in this version.
+  async function unlockTicket(ticket, reason) {
+    if(!isFullAccess) return;
+    if(!reason||!reason.trim()) { addToast("Enter a reason for unlocking","error"); return; }
+    if(!ticket.notionPageId) { addToast("This ticket has no saved Notion record yet — Sync Notion and reopen it first.","error"); return; }
+    setUnlockingTicket(true);
+    try {
+      var now = new Date().toISOString();
+      await notionAPI("/v1/pages/"+ticket.notionPageId,"PATCH",{properties:{
+        "Unlocked Override": {checkbox: true},
+        "Unlocked By":        {rich_text: rtChunks(currentUser.name)},
+        "Unlocked At":        {rich_text: rtChunks(now)},
+        "Unlock Reason":      {rich_text: rtChunks(reason.trim())}
+      }});
+      var updated = Object.assign({},ticket,{unlockedOverride:true, unlockedBy:currentUser.name, unlockedAt:now, unlockReason:reason.trim()});
+      setTickets(function(ts){return ts.map(function(t){return t.notionPageId===ticket.notionPageId?updated:t;});});
+      setReviewSelected(updated);
+      setUnlockPrompt(false);
+      setUnlockReasonInput("");
+      addToast("Ticket unlocked");
+    } catch(e){addToast("Unlock failed: "+e.message,"error");}
+    setUnlockingTicket(false);
   }
 
   // ── RECALCULATE FINAL PASSED ────────────────────────────────────────────────
@@ -4885,6 +4957,7 @@ Rules:
   // ── AGENT DISPUTE (View users) ────────────────────────────────────────────────
   async function saveAgentDispute() {
     if(!reviewSelected||!currentUser){return;}
+    if(isTicketLocked(reviewSelected)) { addToast("This ticket is locked ("+ticketLockDateLabel(reviewSelected)+") — disputes can no longer be filed","error"); return; }
     var pending=Object.entries(disputeState).filter(function(e){
       var d=e[1];return d.newScore&&d.justification&&d.justification.trim();
     });
@@ -4987,6 +5060,7 @@ Rules:
 
   async function saveDispute() {
     if(!reviewSelected||!disputerName.trim()){addToast("Select your name first","error");return;}
+    if(isTicketLocked(reviewSelected)) { addToast("This ticket is locked ("+ticketLockDateLabel(reviewSelected)+") — a Full-access user must unlock it first","error"); return; }
     var pending=Object.entries(disputeState).filter(function(e){
       var d=e[1];return (d.newScore&&d.justification&&d.justification.trim())||d.removed;
     });
@@ -5473,7 +5547,7 @@ Rules:
                       return(
                         <div key={t.id} className="qa-row" style={{display:"grid",gridTemplateColumns:(isEditor?"100px 1fr 1fr 80px 80px 80px 80px 80px":"100px 1fr 1fr 80px 80px 80px 80px"),gap:"6px",padding:"8px",borderRadius:"var(--border-radius-md)",marginBottom:"2px",cursor:"pointer",alignItems:"center",background:isReviewed?"var(--color-background-secondary)":"transparent"}}
                           onClick={function(){setReviewSelected(t);setDisputeState({});}}>
-                          <span style={{fontSize:"12px",fontWeight:500,color:"var(--color-text-info)"}}>{t.ticketId}</span>
+                          <span style={{fontSize:"12px",fontWeight:500,color:"var(--color-text-info)"}}>{isTicketLocked(t)&&<span title={"Locked since "+ticketLockDateLabel(t)}>🔒 </span>}{t.ticketId}</span>
                           <span style={{fontSize:"12px",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.agentName}</span>
                           <span style={{fontSize:"12px",color:"var(--color-text-secondary)",overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{t.contactReason||"—"}</span>
                           {isEditor&&<span style={{fontSize:"11px",color:"var(--color-text-secondary)"}}>{t.reviewer}</span>}
@@ -5515,7 +5589,7 @@ Rules:
                 <div style={{display:"flex",gap:"8px",alignItems:"center",flexWrap:"wrap"}}>
                   {reviewSelected.ticketUrl&&<a href={reviewSelected.ticketUrl} target="_blank" style={{fontSize:"12px",color:"var(--color-text-info)"}}>Open in Gorgias ↗</a>}
                   {/* Autofail controls */}
-                  {isEditor&&!reviewSelected.autofail&&(
+                  {isEditor&&!reviewSelected.autofail&&!isTicketLocked(reviewSelected)&&(
                     autofailPrompt?(
                       <div style={{display:"flex",gap:"6px",alignItems:"center",background:"var(--color-background-danger)",padding:"6px 10px",borderRadius:"var(--border-radius-md)",border:"0.5px solid var(--color-border-danger)"}}>
                         <select value={autofailSelected} onChange={function(e){setAutofailSelected(e.target.value);}}
@@ -5533,7 +5607,7 @@ Rules:
                       <button onClick={function(){setAutofailPrompt(true);}} style={{...ghost,fontSize:"12px",color:"var(--color-text-danger)",borderColor:"var(--color-border-danger)"}}>⚠ Mark autofail</button>
                     )
                   )}
-                  {isEditor&&reviewSelected.autofail&&(
+                  {isEditor&&reviewSelected.autofail&&!isTicketLocked(reviewSelected)&&(
                     removeAutofailPrompt?(
                       <div style={{display:"flex",gap:"6px",alignItems:"center",background:"var(--color-background-warning)",padding:"6px 10px",borderRadius:"var(--border-radius-md)",border:"0.5px solid var(--color-border-warning)"}}>
                         <input type="text" placeholder="Justification for removing autofail..."
@@ -5549,10 +5623,37 @@ Rules:
                       <button onClick={function(){setRemoveAutofailPrompt(true);}} style={{...ghost,fontSize:"12px",color:"var(--color-text-warning)",borderColor:"var(--color-border-warning)"}}>✕ Remove autofail</button>
                     )
                   )}
-                  {isEditor&&<button onClick={function(){handleReauditClick(reviewSelected);}} style={{...ghost,fontSize:"12px",color:"var(--color-text-info)",borderColor:"var(--color-border-info)"}}>↺ Re-audit</button>}
-                  {isEditor&&<button onClick={function(){handleDeleteClick(reviewSelected);}} style={{...ghost,fontSize:"12px",color:"var(--color-text-danger)",borderColor:"var(--color-border-danger)"}}>🗑 Delete audit</button>}
+                  {isEditor&&!isTicketLocked(reviewSelected)&&<button onClick={function(){handleReauditClick(reviewSelected);}} style={{...ghost,fontSize:"12px",color:"var(--color-text-info)",borderColor:"var(--color-border-info)"}}>↺ Re-audit</button>}
+                  {isEditor&&!isTicketLocked(reviewSelected)&&<button onClick={function(){handleDeleteClick(reviewSelected);}} style={{...ghost,fontSize:"12px",color:"var(--color-text-danger)",borderColor:"var(--color-border-danger)"}}>🗑 Delete audit</button>}
                 </div>
               </div>
+
+              {isTicketLocked(reviewSelected)&&(
+                <div style={{...card,marginBottom:"12px",background:"var(--color-background-secondary)",display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:"10px"}}>
+                  <div>
+                    <p style={{margin:"0 0 2px",fontSize:"13px",fontWeight:600}}>🔒 Locked since {ticketLockDateLabel(reviewSelected)}</p>
+                    <p style={{margin:0,fontSize:"12px",color:"var(--color-text-secondary)"}}>Disputes, re-audit, delete/replace, and autofail changes are frozen for this ticket.</p>
+                  </div>
+                  {isFullAccess&&(
+                    unlockPrompt?(
+                      <div style={{display:"flex",gap:"6px",alignItems:"center",flexWrap:"wrap"}}>
+                        <input type="text" placeholder="Reason for unlocking..." value={unlockReasonInput} onChange={function(e){setUnlockReasonInput(e.target.value);}}
+                          style={{fontSize:"11px",padding:"4px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",width:"220px"}}/>
+                        <button onClick={function(){unlockTicket(reviewSelected,unlockReasonInput);}} disabled={unlockingTicket||!unlockReasonInput.trim()}
+                          style={{...btnSuccess,fontSize:"11px",padding:"4px 10px",opacity:!unlockReasonInput.trim()?0.5:1}}>{unlockingTicket?"Unlocking...":"Confirm unlock"}</button>
+                        <button onClick={function(){setUnlockPrompt(false);setUnlockReasonInput("");}} style={{...ghost,fontSize:"11px",padding:"4px 8px"}}>Cancel</button>
+                      </div>
+                    ):(
+                      <button onClick={function(){setUnlockPrompt(true);}} style={{...ghost,fontSize:"12px"}}>🔓 Unlock</button>
+                    )
+                  )}
+                </div>
+              )}
+              {reviewSelected.unlockedOverride&&(
+                <div style={{...card,marginBottom:"12px",background:"var(--color-background-info)",border:"0.5px solid var(--color-border-info)"}}>
+                  <p style={{margin:0,fontSize:"12px",color:"var(--color-text-info)"}}>🔓 Unlocked by {reviewSelected.unlockedBy} on {(reviewSelected.unlockedAt||"").slice(0,10)} — "{reviewSelected.unlockReason}"</p>
+                </div>
+              )}
 
               {/* Ticket info bar */}
               <div style={{...card,marginBottom:"12px"}}>
@@ -5935,13 +6036,13 @@ Rules:
                 return(
                   <div style={{position:"sticky",bottom:"16px",zIndex:100,display:"flex",flexDirection:"column",gap:"8px"}}>
                     {/* Editor: save disputes */}
-                    {isEditor&&pendingCount>0&&(
+                    {isEditor&&pendingCount>0&&!isTicketLocked(reviewSelected)&&(
                       <button onClick={saveDispute} disabled={savingDispute} style={{...btnSuccess,width:"100%",padding:"12px",fontSize:"14px",opacity:savingDispute?0.5:1}}>
                         {savingDispute?"Saving...":"Save "+pendingCount+" dispute"+(pendingCount!==1?"s":"")+" as "+currentUser.name}
                       </button>
                     )}
                     {/* Agent View: submit disputes for approval */}
-                    {isViewOnly&&pendingCount>0&&(
+                    {isViewOnly&&pendingCount>0&&!isTicketLocked(reviewSelected)&&(
                       <button onClick={saveAgentDispute} disabled={savingDispute} style={{...btnInfo,width:"100%",padding:"12px",fontSize:"14px",opacity:savingDispute?0.5:1}}>
                         {savingDispute?"Submitting...":"Submit "+pendingCount+" dispute"+(pendingCount!==1?"s":"")+" for review"}
                       </button>
