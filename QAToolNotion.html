@@ -2,10 +2,16 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.90
+  Version:  2.0.91
   Date:     2026-06-09
 
   Changelog:
+  v2.0.91 (2026-07-30) -- Fix: product_l2 dropped on fetch (breaking CTF Accuracy) + wrong week on Delete & Replace
+    - Fix: the Gorgias fetch loop computed prodParts via parseTicketField (which returns [L1, L2] just like contact_reason and ticket_resolution) but only ever wrote prodParts[0] to the output row — product_l2 was silently dropped on every fetch. Since the CTF Accuracy rubric explicitly checks product_l1/l2 against the transcript, the AI saw Product L2 as permanently blank and treated it as a mistagged/missing field, so CTF was effectively always failing. Added the missing product_l2 line. mapRow() already read product_l2 correctly and the fetch CSV export derives its headers dynamically from the row object, so this one line fixes the whole chain (fetch -> CSV export -> Notion save -> scoring prompt) with no other changes needed.
+    - Fix: scoreAndSaveReplacement() derived the replacement audit's week from the REPLACEMENT ticket's created date instead of inheriting the original audit's week. Delete & Replace searches for a same-agent replacement without constraining created date, so pulling a newer ticket pushed the audit into a future week (e.g. an audit replaced this week landing under "Aug 3 - Aug 9"), which then skewed Balance Audits counts and weekly reporting. Now inherits originalTicket.week (a replacement stands in for the original audit's slot), falling back to the old behaviour only if the original has no week.
+    - Same hardening applied to the re-audit path: it re-scores the same ticket so its week was already correct, but it re-derived from createdDate and would silently discard any manually-corrected week. Now prefers the stored week and only re-derives as a fallback.
+    - NOTE: this fixes fetches going forward. Tickets already fetched and saved without Product L2 still have a blank value in Notion and will keep scoring poorly on CTF Accuracy until re-fetched or re-audited.
+
   v2.0.90 (2026-07-27) -- New feature: audited tickets lock on the Wednesday of the following week
     - Lock date = Wednesday of the week following the Manila week containing reviewedAt (the human audit-completion timestamp) — NOT the ticket's created-date week, since those can drift apart (backlogs, late catch-up audits, re-audits). A ticket with no reviewedAt yet is never locked. Formula: mnlMondayInstant(reviewedAt) + 9 days.
     - Once locked: no new agent disputes (saveAgentDispute), no auditor direct override (saveDispute), no Re-audit, no Delete & Replace, no Mark/Remove autofail.
@@ -726,7 +732,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 // The Python /proxy injects them server-side based on destination host.
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.90";
+const APP_VERSION = "v2.0.91";
 // ── Debug log buffer ─────────────────────────────────────────────────────────
 // Ring buffer of recent events + uncaught errors, so user-reported issues can be
 // traced. Export via the Settings tab button or exportWingmanLog() in the console.
@@ -2168,7 +2174,12 @@ function App() {
 
     // Build ticket object matching batch QA format
     var auditor = originalTicket.auditor||originalTicket.reviewer||originalTicket.auditedBy||currentUser.name;
-    var week = ticketWeekLabel(replacement.created)||ticketWeekLabel(new Date().toISOString().slice(0,10));
+    // A replacement stands in for the ORIGINAL audit's slot, so it must inherit the original's
+    // week — not derive its own from the replacement ticket's creation date. Delete & Replace
+    // searches by agent without constraining created date, so a newer replacement would
+    // otherwise land the audit in a future week (e.g. an audit replaced this week showing up
+    // under "Aug 3 - Aug 9"), breaking Balance Audits counts and weekly reporting.
+    var week = originalTicket.week || originalTicket.auditWeek || ticketWeekLabel(replacement.created) || ticketWeekLabel(new Date().toISOString().slice(0,10));
 
     var ticketObj = {
       ticketId:      replacement.id,
@@ -2280,7 +2291,9 @@ function App() {
         var parsed = JSON.parse(jsonMatch[0]);
         var sc = calcScore(parsed.scores||{}, matrix);
         var hasAF = (parsed.autofails||[]).length > 0;
-        var week = ticketWeekLabel(rm.ticket.createdDate)||ticketWeekLabel(new Date().toISOString().slice(0,10));
+        // Re-audit re-scores the SAME ticket, so its week must not change. Prefer the stored
+        // week (preserves any manual correction) and only re-derive as a fallback.
+        var week = rm.ticket.week || rm.ticket.auditWeek || ticketWeekLabel(rm.ticket.createdDate) || ticketWeekLabel(new Date().toISOString().slice(0,10));
 
         // Build reaudit history — carry forward existing + add current record
         var prevHistory = rm.ticket.reauditHistory||[];
@@ -4187,6 +4200,7 @@ Rules:
             contact_reason_l1:        crParts[0],
             contact_reason_l2:        crParts[1],
             product_l1:               prodParts[0],
+            product_l2:               prodParts[1],
             ticket_resolution_l1:     resParts[0],
             ticket_resolution_l2:     resParts[1],
             additional_resolution_l1: addResParts[0],
