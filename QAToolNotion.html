@@ -2,10 +2,20 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.91
+  Version:  2.0.92
   Date:     2026-06-09
 
   Changelog:
+  v2.0.92 (2026-07-30) -- New fetch filter: assigned agent message count
+    - New "Assigned agent msg count min" filter on the Fetch tab, beside the existing msg count min/max. Counts only PUBLIC replies sent by the ticket's ASSIGNED agent -- excludes customer messages, bot/Jamie replies from a different sender, and internal notes. Catches tickets that look busy on raw message count but have no actual agent interaction (all bot + customer), which would otherwise get audited and score as all-NA.
+    - Matching is by Gorgias user ID (assignee_user.id vs sender.id) since that's stable; falls back to a normalizeAgentName() comparison only when the API doesn't return usable IDs on both sides.
+    - Internal notes excluded via the message `public` flag. Where Gorgias omits `public` entirely, the message is treated as public so we under-filter rather than silently dropping real replies.
+    - Saved per-ticket as agent_message_count -> Notion "Agent Message Count", flows through CSV export (headers are derived dynamically) and is refreshed on re-audit. The existing messageCount field is deliberately UNTOUCHED, since re-audit's "are there new messages?" check depends on it counting everything.
+    - Min only, no max (per spec). Applies to Balance Audits too, since it shares the fetch loop. New "Skipped -- agent msg count" row in the fetch summary.
+    - Two behaviours worth knowing: (1) this counts the CURRENT assignee only, so a ticket handled by one agent and later reassigned can legitimately read 0 and be filtered out; (2) unassigned tickets always read 0, so any minimum above 0 excludes them.
+    - REQUIRES SETUP: new "Agent Message Count" (Number) property on the QA Audits database.
+    - Going-forward only -- already-fetched tickets have no agent count and are unaffected.
+
   v2.0.91 (2026-07-30) -- Fix: product_l2 dropped on fetch (breaking CTF Accuracy) + wrong week on Delete & Replace
     - Fix: the Gorgias fetch loop computed prodParts via parseTicketField (which returns [L1, L2] just like contact_reason and ticket_resolution) but only ever wrote prodParts[0] to the output row — product_l2 was silently dropped on every fetch. Since the CTF Accuracy rubric explicitly checks product_l1/l2 against the transcript, the AI saw Product L2 as permanently blank and treated it as a mistagged/missing field, so CTF was effectively always failing. Added the missing product_l2 line. mapRow() already read product_l2 correctly and the fetch CSV export derives its headers dynamically from the row object, so this one line fixes the whole chain (fetch -> CSV export -> Notion save -> scoring prompt) with no other changes needed.
     - Fix: scoreAndSaveReplacement() derived the replacement audit's week from the REPLACEMENT ticket's created date instead of inheriting the original audit's week. Delete & Replace searches for a same-agent replacement without constraining created date, so pulling a newer ticket pushed the audit into a future week (e.g. an audit replaced this week landing under "Aug 3 - Aug 9"), which then skewed Balance Audits counts and weekly reporting. Now inherits originalTicket.week (a replacement stands in for the original audit's slot), falling back to the old behaviour only if the original has no week.
@@ -732,7 +742,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 // The Python /proxy injects them server-side based on destination host.
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.91";
+const APP_VERSION = "v2.0.92";
 // ── Debug log buffer ─────────────────────────────────────────────────────────
 // Ring buffer of recent events + uncaught errors, so user-reported issues can be
 // traced. Export via the Settings tab button or exportWingmanLog() in the console.
@@ -954,6 +964,7 @@ async function loadTicketsFromNotion(dbId, onStatus) {
     autofail:      page.properties&&page.properties["Autofail"]&&page.properties["Autofail"].checkbox||false,
     autofailManual:page.properties&&page.properties["Autofail Manual"]&&page.properties["Autofail Manual"].checkbox||false,
     messageCount:  page.properties&&page.properties["Message Count"]&&page.properties["Message Count"].number||null,
+    agentMessageCount: page.properties&&page.properties["Agent Message Count"]&&page.properties["Agent Message Count"].number,
     reauditHistory: getProp(page,"Reaudit History")||"[]",
     unlockedOverride: page.properties&&page.properties["Unlocked Override"]&&page.properties["Unlocked Override"].checkbox||false,
     unlockedBy: getProp(page,"Unlocked By")||"", unlockedAt: getProp(page,"Unlocked At")||"", unlockReason: getProp(page,"Unlock Reason")||"",
@@ -1103,6 +1114,7 @@ async function saveTicketToNotion(dbId, ticket) {
     "Saved At":           { rich_text: rt(new Date().toISOString()) },
     "Audit Type":         { rich_text: rt(ticket.auditType||"AI Batch") },
     "Message Count":      { number: ticket.messageCount||ticket.message_count||0 },
+    "Agent Message Count": { number: ticket.agentMessageCount||ticket.agent_message_count||0 },
     "Reaudit History":    { rich_text: rt(JSON.stringify(ticket.reauditHistory||[])) },
   };
   if (ticket.ticketUrl) props["Ticket URL"] = { url: ticket.ticketUrl };
@@ -1222,6 +1234,7 @@ function parseNotionRow(r) {
     reopenHistoryJSON: r.reopenHistoryJSON || r["Reopen History JSON"] || "[]",
     auditType: r.auditType || r["Audit Type"] || "AI Batch",
     messageCount: parseInt(r.messageCount ?? r["Message Count"] ?? "") || null,
+    agentMessageCount: parseInt(r.agentMessageCount ?? r["Agent Message Count"] ?? "") || null,
     reauditHistory: (function(){
       try { return JSON.parse(r.reauditHistory || r["Reaudit History"] || "[]"); } catch(e){ return []; }
     })(),
@@ -1500,6 +1513,7 @@ function mapRow(row) {
     resolutionL1: r1, resolutionL2: r2,
     addResolutionL1: ar1, addResolutionL2: ar2,
     messageCount: parseInt(row["message_count"] || "0") || 0,
+    agentMessageCount: parseInt(row["agent_message_count"] || "") || null,
     transcript: row["transcript"] || "",
     initialChannel: row["initial_channel"] || ""
   };
@@ -1729,7 +1743,7 @@ function App() {
     agentFilter:"Has agent assigned",
     selectedAgents:{},
     crL1:allTrue(CR_L1_OPTS),crL2:allTrue(CR_L2_OPTS),prodL1:"",resL1:"",resL2:"",addResL1:"",addResL2:"",
-    msgMin:"",msgMax:"",
+    msgMin:"",msgMax:"",agentMsgMin:"",
     ticketsPerAgent:"",maxTickets:"500",skipHours:"24",
     keyword:"",
     balanceTarget:"",
@@ -2332,6 +2346,7 @@ function App() {
           savedAt:       new Date().toISOString(),
           transcript:    transcript,
           messageCount:  newCount,
+          agentMessageCount: countAssignedAgentMessages(msgs, null, rm.ticket.agentName),
           reauditHistory:newHistory,
           auditType:     "Re-audit",
         };
@@ -3934,6 +3949,32 @@ Rules:
     return lines.join(" | ");
   }
 
+  // Counts PUBLIC replies (not internal notes) sent by the ASSIGNED agent specifically.
+  // Matches on Gorgias user ID where available since that's stable; falls back to a
+  // normalized-name compare (same NBSP/whitespace collapsing used everywhere else) only
+  // when the API doesn't give us usable IDs on both sides.
+  // Note: this counts the CURRENT assignee only. If a ticket was handled by one agent and
+  // later reassigned, the earlier agent's replies do NOT count here — by design, since the
+  // audit is of the assigned agent, but it means a reassigned ticket can legitimately read 0.
+  function countAssignedAgentMessages(messages, agentId, agentName) {
+    if(!messages || !messages.length) return 0;
+    if(!agentId && !agentName) return 0;
+    var normTarget = normalizeAgentName(agentName||"");
+    return messages.filter(function(m){
+      // Internal notes don't count — only replies that actually reached the customer.
+      // Gorgias omits `public` on some message shapes; treat missing as public (true)
+      // rather than dropping the message, so we under-filter instead of over-filtering.
+      var isPublic = (m.public === undefined || m.public === null) ? true : !!m.public;
+      if(!isPublic) return false;
+      var fromAgent = m.from_agent || ((m.sender||{}).meta||{}).is_staff;
+      if(!fromAgent) return false;
+      var s = m.sender || {};
+      if(agentId && s.id != null) return String(s.id) === String(agentId);
+      var sName = normalizeAgentName(s.name || ((s.firstname||"")+" "+(s.lastname||"")).trim());
+      return !!sName && !!normTarget && sName.toLowerCase() === normTarget.toLowerCase();
+    }).length;
+  }
+
   function parseTicketField(ticket, fieldId) {
     var cf = ticket.custom_fields || {};
     var val = cf[String(fieldId)];
@@ -4011,7 +4052,7 @@ Rules:
       var fc = {
         scanned:0, raw:0, skippedStatus:0, skippedRecentlyClosed:0,
         skippedChannel:0, skippedAgentFilter:0, skippedExcludedAgent:0,
-        skippedCR:0, skippedRes:0, skippedMsgCount:0, skippedKeyword:0,
+        skippedCR:0, skippedRes:0, skippedMsgCount:0, skippedAgentMsgCount:0, skippedKeyword:0,
         skippedAgentCap:0, skippedDeleted:0, skippedMsgFetch:0, skippedAlreadyAudited:0, rateLimited:false, result:0
       };
 
@@ -4104,9 +4145,11 @@ Rules:
           if(f.agentFilter==="No agent assigned" && t.assignee_user)   { fc.skippedAgentFilter++; fdbg(tid,"SKIP agent: has agent (wanted unassigned)"); continue; }
 
           var agentName = "";
+          var agentId = null;
           if(t.assignee_user) {
             var au = t.assignee_user;
             agentName = normalizeAgentName(au.name || ((au.firstname||"")+" "+(au.lastname||"")).trim());
+            agentId = au.id != null ? String(au.id) : null;
           }
 
           if(agentName && EXCLUDED_AGENT_NAMES.includes(agentName)) {
@@ -4178,6 +4221,13 @@ Rules:
           if(minMsg2 && msgCount < minMsg2) { fc.skippedMsgCount++; fdbg(tid,"SKIP msg-count: "+msgCount+" < min "+minMsg2); await new Promise(function(r){setTimeout(r,500);}); continue; }
           if(maxMsg2 && msgCount > maxMsg2) { fc.skippedMsgCount++; fdbg(tid,"SKIP msg-count: "+msgCount+" > max "+maxMsg2); await new Promise(function(r){setTimeout(r,500);}); continue; }
 
+          // Assigned-agent message count: public replies from the assigned agent only.
+          // Catches tickets that look busy on raw message count but have no actual agent
+          // interaction (all bot + customer), which would otherwise score as all-NA.
+          var agentMsgCount = countAssignedAgentMessages(messages, agentId, agentName);
+          var minAgentMsg = parseInt(f.agentMsgMin||"")||null;
+          if(minAgentMsg && agentMsgCount < minAgentMsg) { fc.skippedAgentMsgCount++; fdbg(tid,"SKIP agent-msg-count: "+agentMsgCount+" < min "+minAgentMsg+" (assigned: '"+(agentName||"none")+"')"); await new Promise(function(r){setTimeout(r,500);}); continue; }
+
           if(f.keyword && f.keyword.trim()) {
             var haystack = (transcript + " " + (t.subject||"")).toLowerCase();
             var kwWords = f.keyword.trim().toLowerCase().split(/[\s,]+/).filter(function(w){return w.length>0;});
@@ -4206,6 +4256,7 @@ Rules:
             additional_resolution_l1: addResParts[0],
             additional_resolution_l2: addResParts[1],
             message_count:            msgCount,
+            agent_message_count:      agentMsgCount,
             transcript:               transcript,
           });
           fdbg(tid,"PASS  status="+(t.status||"")+" channel="+((t.channel||t.via||t.initial_channel||"").toLowerCase())+" crL1="+crParts[0]+" crL2="+crParts[1]+" agent="+agentName+" msgs="+msgCount);
@@ -6287,7 +6338,7 @@ Rules:
                 style={{background:"none",border:"none",cursor:"pointer",padding:0,display:"flex",alignItems:"center",gap:"6px",color:"var(--color-text-secondary)",fontSize:"12px"}}>
                 <span style={{fontSize:"10px"}}>{showAdvancedFetch?"▾":"▸"}</span>
                 Advanced filters
-                {(fetchForm.resL1||fetchForm.resL2||fetchForm.addResL1||fetchForm.addResL2||fetchForm.keyword||fetchForm.msgMin||fetchForm.msgMax)&&<span style={{fontSize:"10px",padding:"1px 5px",background:"var(--color-background-info)",color:"var(--color-text-info)",borderRadius:"3px",border:"0.5px solid var(--color-border-info)"}}>active</span>}
+                {(fetchForm.resL1||fetchForm.resL2||fetchForm.addResL1||fetchForm.addResL2||fetchForm.keyword||fetchForm.msgMin||fetchForm.msgMax||fetchForm.agentMsgMin)&&<span style={{fontSize:"10px",padding:"1px 5px",background:"var(--color-background-info)",color:"var(--color-text-info)",borderRadius:"3px",border:"0.5px solid var(--color-border-info)"}}>active</span>}
               </button>
               {showAdvancedFetch&&(
                 <div style={{marginTop:"12px",padding:"14px",background:"var(--color-background-secondary)",borderRadius:"var(--border-radius-md)",border:"0.5px solid var(--color-border-tertiary)"}}>
@@ -6336,6 +6387,12 @@ Rules:
                         onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{msgMax:e.target.value});});}}
                         style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
                     </div>
+                    <div>
+                      <label style={{...lbl,marginBottom:"4px"}}>Assigned agent msg count min <span style={{fontWeight:400,textTransform:"none",letterSpacing:0,color:"var(--color-text-secondary)"}}>— public replies from the assigned agent only, excludes bot &amp; internal notes</span></label>
+                      <input type="number" placeholder="any" value={fetchForm.agentMsgMin}
+                        onChange={function(e){setFetchForm(function(f){return Object.assign({},f,{agentMsgMin:e.target.value});});}}
+                        style={{width:"100%",boxSizing:"border-box",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+                    </div>
                   </div>
                 </div>
               )}
@@ -6360,6 +6417,7 @@ Rules:
                     {label:"Skipped — contact reason",val:fetchSummary.skippedCR,color:fetchSummary.skippedCR>0?"var(--color-text-warning)":null},
                     {label:"Skipped — resolution",val:fetchSummary.skippedRes,color:fetchSummary.skippedRes>0?"var(--color-text-warning)":null},
                     {label:"Skipped — msg count",val:fetchSummary.skippedMsgCount,color:fetchSummary.skippedMsgCount>0?"var(--color-text-warning)":null},
+                    {label:"Skipped — agent msg count",val:fetchSummary.skippedAgentMsgCount,color:fetchSummary.skippedAgentMsgCount>0?"var(--color-text-warning)":null},
                     {label:"Skipped — keyword",val:fetchSummary.skippedKeyword,color:fetchSummary.skippedKeyword>0?"var(--color-text-warning)":null},
                     {label:"Skipped — previously deleted",val:fetchSummary.skippedDeleted,color:fetchSummary.skippedDeleted>0?"var(--color-text-warning)":null},
                     {label:"Skipped — agent cap",val:fetchSummary.skippedAgentCap,color:fetchSummary.skippedAgentCap>0?"var(--color-text-warning)":null},
