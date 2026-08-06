@@ -2,10 +2,21 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.93
+  Version:  2.0.94
   Date:     2026-06-09
 
   Changelog:
+  v2.0.94 (2026-07-30) -- One-time CTF correction tool (Settings > Data Integrity, Full access only)
+    - Remediates tickets scored before the v2.0.93 fix, where the AI never saw Product / Ticket Resolution tags and marked them "not tagged", depressing CTF Accuracy across the board.
+    - Two-pass by design. PREVIEW pass is read-only: re-fetches each ticket's live tags from Gorgias (Notion never stored raw tag values), re-scores CTF ONLY via a focused single-category prompt, and buckets results into raise / lower / unchanged / skipped / errors. Nothing is written until you review and click Apply.
+    - Only ever RAISES a score. Anything scoring lower than the original is listed for manual review and never applied -- the bug systematically depressed CTF, so a lower re-score is more likely Claude run-to-run variance than a real correction, and silently docking agents in an unundoable bulk job is the wrong trade.
+    - Tickets whose CTF dispute a human already approved OR rejected are skipped entirely -- a human made that call and the tool does not reverse it.
+    - A PENDING CTF dispute the re-run supports (new score >= the score the agent asked for) is auto-approved and attributed to the operator as "(CTF correction)". A pending dispute the re-run does NOT support is left pending for a human -- this tool never auto-rejects.
+    - Recalculates AI Score / Final Score / AI Passed / Final Passed from the new CTF value, respecting autofail and any approved dispute on other categories. Every change is appended to Reaudit History as type "system-ctf-correction" with the before/after CTF level and score.
+    - Deliberately bypasses the Wednesday lock: this is a Full-access repair of a system bug, and every change is logged. Run it before the affected week locks where possible.
+    - Stop button on both passes; ~600ms pacing on the scan and ~350ms on the write to stay under Gorgias/Anthropic rate limits.
+    - Defensive fix: reauditHistory is normalized to an array before append, since a raw JSON string would have silently corrupted the history via string concat rather than erroring.
+
   v2.0.93 (2026-07-30) -- Fix: AI never saw Product / Ticket Resolution tags, so CTF Accuracy could never pass
     - ROOT CAUSE: mapFetchedToQA() -- the handoff from Fetch to Batch QA -- hand-mapped only 8 fields and silently dropped product_l1/l2, ticket_resolution_l1/l2 and additional_resolution_l1/l2. buildEvalPrompt() then read undefined for those and printed "Product: not tagged" / "Ticket Resolution: not tagged" into the scoring prompt on EVERY fetched ticket. Contact Reason WAS mapped, which is exactly why that one field always read correctly while the other two always failed -- the AI was scoring the prompt it was given, accurately. This is separate from (and larger than) the v2.0.91 product_l2 fix, which only affected the CSV export path.
     - mapFetchedToQA now delegates to mapRow(), which the CSV import path already used and which handles the identical snake_case key shape (the fetch row IS what gets exported to CSV). One mapping instead of two that can drift apart.
@@ -749,7 +760,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 // The Python /proxy injects them server-side based on destination host.
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.93";
+const APP_VERSION = "v2.0.94";
 // ── Debug log buffer ─────────────────────────────────────────────────────────
 // Ring buffer of recent events + uncaught errors, so user-reported issues can be
 // traced. Export via the Settings tab button or exportWingmanLog() in the console.
@@ -1826,6 +1837,13 @@ function App() {
   const [removeAutofailPrompt,setRemoveAutofailPrompt]=useState(false);
   const [removeAutofailReason,setRemoveAutofailReason]=useState("");
   const [unlockPrompt,setUnlockPrompt]=useState(false);
+  // ── One-time CTF correction (v2.0.93 bug remediation) ──
+  const [ctfFixWeek,setCtfFixWeek]=useState("");
+  const [ctfFixRunning,setCtfFixRunning]=useState(false);
+  const [ctfFixStatus,setCtfFixStatus]=useState("");
+  const [ctfFixPreview,setCtfFixPreview]=useState(null); // {raise:[],lower:[],same:[],skipped:[],errors:[]}
+  const [ctfFixApplying,setCtfFixApplying]=useState(false);
+  const ctfFixStopRef = React.useRef(false);
   const [unlockReasonInput,setUnlockReasonInput]=useState("");
   const [unlockingTicket,setUnlockingTicket]=useState(false);
 
@@ -3743,6 +3761,179 @@ Rules:
       addToast("Ticket unlocked");
     } catch(e){addToast("Unlock failed: "+e.message,"error");}
     setUnlockingTicket(false);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // ONE-TIME CTF CORRECTION (remediates the v2.0.93 "not tagged" bug)
+  // Re-scores CTF Accuracy ONLY, leaving all other categories untouched.
+  // Deliberately conservative: only ever RAISES a score, never lowers one, and
+  // skips any ticket where a human already made a call on a CTF dispute.
+  // ══════════════════════════════════════════════════════════════════════════
+
+  function buildCtfOnlyPrompt(ticket, tags) {
+    var ctfCat = matrix.find(function(c){return c.id==="ctf";});
+    if(!ctfCat) return null;
+    var levels = ctfCat.levels.map(function(l){return l.level+(l.points!==null?" ("+l.points+")":"");}).join("|");
+    var defs = ctfCat.levels.map(function(l){return l.level+"="+l.definition;}).join(" | ");
+    function pair(a,b){ return (a&&b&&b!=="N/A") ? a+"::"+b : (a||"not tagged"); }
+    var cleanTranscript = (ticket.transcript||"").slice(0,8000)
+      .replace(/â€™/g,"'").replace(/â€˜/g,"'").replace(/â€œ/g,'"').replace(/â€/g,'"');
+    return "You are a QA evaluator for Freedom Grooming customer support. Respond in English only.\n\n"
+      +"Evaluate ONE category only: "+ctfCat.label+".\n\n"
+      +"WHAT IT MEASURES: "+(ctfCat.whatItMeasures||"")+"\n\n"
+      +"SCORE LEVELS ["+levels+"]: "+defs+"\n\n"
+      +(scoringContext&&scoringContext.trim()?"WORKFLOW & CONTEXT NOTES:\n"+scoringContext.trim()+"\n\n":"")
+      +"TICKET ID: "+ticket.ticketId+"\n"
+      +"AGENT: "+ticket.agentName+"\n\n"
+      +"TICKET FIELD VALUES (as currently tagged in Gorgias — evaluate these against the transcript):\n"
+      +"  Contact Reason: "+pair(tags.contactReasonL1,tags.contactReasonL2)+"\n"
+      +"  Product: "+pair(tags.productL1,tags.productL2)+"\n"
+      +"  Ticket Resolution: "+pair(tags.resolutionL1,tags.resolutionL2)+"\n"
+      +"  Additional Resolution: "+pair(tags.addResolutionL1,tags.addResolutionL2)+"\n\n"
+      +"TRANSCRIPT:\n"+cleanTranscript+"\n\n"
+      +'Respond ONLY with JSON, no markdown: {"score":"'+levels+'","reason":"1-2 sentences","improve":"1 sentence or null"}';
+  }
+
+  // Pass 1 — read-only. Scores every eligible ticket and buckets the outcome.
+  // Writes NOTHING to Notion; the result feeds a preview the user approves first.
+  async function runCtfFixPreview() {
+    if(!isFullAccess) return;
+    if(!ctfFixWeek) { addToast("Pick a week first","error"); return; }
+    var ctfCat = matrix.find(function(c){return c.id==="ctf";});
+    if(!ctfCat) { addToast("No 'ctf' category found in the current rubric","error"); return; }
+
+    var inWeek = tickets.filter(function(t){ return t.week===ctfFixWeek && t.notionPageId && !t.deleted; });
+    if(!inWeek.length) { addToast("No saved tickets found for "+ctfFixWeek,"error"); return; }
+
+    setCtfFixRunning(true); ctfFixStopRef.current=false;
+    var out = {raise:[],lower:[],same:[],skipped:[],errors:[]};
+
+    for(var i=0;i<inWeek.length;i++){
+      if(ctfFixStopRef.current){ setCtfFixStatus("Stopped at "+i+" of "+inWeek.length); break; }
+      var t = inWeek[i];
+      setCtfFixStatus("Scanning "+(i+1)+" of "+inWeek.length+" — #"+t.ticketId);
+
+      // Skip where a human already decided a CTF dispute (approved or rejected).
+      var d = t.disputes && t.disputes.ctf;
+      if(d && (d.status==="approved" || !d.status)) { out.skipped.push({t:t,why:"CTF dispute already approved"}); continue; }
+      if(d && d.status==="rejected") { out.skipped.push({t:t,why:"CTF dispute already rejected"}); continue; }
+      if(!t.transcript || t.transcript.trim().length<20) { out.skipped.push({t:t,why:"No transcript stored"}); continue; }
+
+      try {
+        // Notion never stored the raw tag values, so pull them fresh from Gorgias.
+        var gt = await gorgiasAPI("/tickets/"+t.ticketId);
+        if(!gt || gt.error) { out.errors.push({t:t,why:"Gorgias fetch failed"}); continue; }
+        var cr=parseTicketField(gt,FIELD_CR), pr=parseTicketField(gt,FIELD_PROD),
+            rs=parseTicketField(gt,FIELD_RES), ad=parseTicketField(gt,FIELD_ADDRES);
+        var tags = { contactReasonL1:cr[0],contactReasonL2:cr[1], productL1:pr[0],productL2:pr[1],
+                     resolutionL1:rs[0],resolutionL2:rs[1], addResolutionL1:ad[0],addResolutionL2:ad[1] };
+
+        var raw = await callClaudeWithRetry(buildCtfOnlyPrompt(t,tags));
+        var clean = raw.replace(/```(?:json)?\s*/g,"").replace(/```/g,"").trim();
+        var jm = clean.match(/\{[\s\S]+\}/);
+        if(!jm) { out.errors.push({t:t,why:"No JSON in response"}); continue; }
+        var parsed = JSON.parse(jm[0]);
+        var newLevel = parsed.score||"";
+        var oldLevel = (t.aiScores&&t.aiScores.ctf)||"";
+        var newPts = parseScoreVal(newLevel), oldPts = parseScoreVal(oldLevel);
+        if(newPts===null) { out.errors.push({t:t,why:"Unparseable score: "+newLevel}); continue; }
+
+        var rec = {t:t, oldLevel:oldLevel, newLevel:newLevel, oldPts:oldPts, newPts:newPts,
+                   reason:parsed.reason||"", improve:parsed.improve||"", tags:tags, dispute:d||null};
+
+        if(oldPts===null || newPts>oldPts) out.raise.push(rec);
+        else if(newPts<oldPts) out.lower.push(rec);   // never applied — surfaced for manual review
+        else out.same.push(rec);
+      } catch(e){ out.errors.push({t:t,why:e.message}); }
+      await new Promise(function(r){setTimeout(r,600);}); // be kind to Gorgias + Anthropic
+    }
+
+    setCtfFixPreview(out);
+    setCtfFixStatus("");
+    setCtfFixRunning(false);
+    addToast("Scan complete — "+out.raise.length+" to raise, "+out.lower.length+" lower (skipped), "+out.same.length+" unchanged");
+  }
+
+  // Pass 2 — writes only the "raise" bucket. Ignores the Wednesday lock deliberately:
+  // this is a Full-access repair of a system bug, and every change is logged to
+  // Reaudit History marked as a system correction.
+  async function applyCtfFix() {
+    if(!isFullAccess || !ctfFixPreview) return;
+    var toApply = ctfFixPreview.raise;
+    if(!toApply.length) { addToast("Nothing to apply"); return; }
+    if(!window.confirm("Apply "+toApply.length+" CTF correction"+(toApply.length!==1?"s":"")+"?\n\nThis overwrites the CTF score and recalculates the final score on each. It bypasses the Wednesday lock and cannot be undone in bulk.")) return;
+
+    setCtfFixApplying(true); ctfFixStopRef.current=false;
+    var done=0, failed=0, approved=0;
+    var nowIso = new Date().toISOString();
+
+    for(var i=0;i<toApply.length;i++){
+      if(ctfFixStopRef.current){ setCtfFixStatus("Stopped after "+done); break; }
+      var r = toApply[i], t = r.t;
+      setCtfFixStatus("Applying "+(i+1)+" of "+toApply.length+" — #"+t.ticketId);
+      try {
+        var newScores = Object.assign({}, t.aiScores||{}, {ctf:r.newLevel});
+        var sc = calcScore(newScores, matrix);
+        var newPct = sc?sc.pct:0;
+        var newPassed = !t.autofail && newPct>=85;
+
+        // A pending CTF dispute the re-run now supports gets auto-approved.
+        // If the re-run does NOT support it, it's left pending for a human — this tool
+        // never auto-rejects, matching the "only raise" principle.
+        var newDisputes = Object.assign({}, t.disputes||{});
+        var pd = newDisputes.ctf;
+        if(pd && pd.status==="pending"){
+          var wanted = parseScoreVal(pd.finalScore);
+          if(wanted!==null && r.newPts>=wanted){
+            newDisputes.ctf = Object.assign({}, pd, {
+              status:"approved", decidedBy:currentUser.name+" (CTF correction)", decidedAt:nowIso, rejectedReason:""
+            });
+            approved++;
+          }
+        }
+        var disputedRes = calcDisputedScore(Object.assign({},t,{aiScores:newScores,disputes:newDisputes}), matrix);
+        var disputedPct = disputedRes?disputedRes.pct:newPct;
+        var disputedPassed = !t.autofail && disputedPct>=85;
+
+        var prevHist = t.reauditHistory;
+        if(typeof prevHist === "string"){ try { prevHist = JSON.parse(prevHist||"[]"); } catch(e2){ prevHist = []; } }
+        if(!Array.isArray(prevHist)) prevHist = [];
+        var hist = prevHist.concat([{
+          version:prevHist.length+1,
+          type:"system-ctf-correction",
+          note:"CTF re-scored after v2.0.93 tag-visibility fix",
+          ctfBefore:r.oldLevel, ctfAfter:r.newLevel,
+          scoreBefore:t.finalScore, scoreAfter:disputedPct,
+          by:currentUser.name, at:nowIso
+        }]);
+
+        var justif = Object.assign({}, t.justifications||{}, {ctf:{reason:r.reason,improve:r.improve}});
+
+        await notionPatchRetry(t.notionPageId, {
+          "Scores JSON":   {rich_text: rtChunks(JSON.stringify(newScores))},
+          "Disputes JSON": {rich_text: rtChunks(JSON.stringify(newDisputes))},
+          "AI Score":      {number: newPct},
+          "Final Score":   {number: disputedPct},
+          "AI Passed":     {checkbox: !!newPassed},
+          "Final Passed":  {checkbox: !!disputedPassed},
+          "CTF Notes":     {rich_text: rtChunks(r.reason+(r.improve?" | Improve: "+r.improve:""))},
+          "Reaudit History":{rich_text: rtChunks(JSON.stringify(hist))}
+        }, 3);
+
+        var updated = Object.assign({}, t, {
+          aiScores:newScores, disputes:newDisputes, justifications:justif,
+          aiScore:newPct, finalScore:disputedPct, passed:newPassed,
+          disputedPassed:disputedPassed, reauditHistory:hist
+        });
+        setTickets(function(ts){return ts.map(function(x){return x.notionPageId===t.notionPageId?updated:x;});});
+        done++;
+      } catch(e){ failed++; console.error("[CTF fix] #"+t.ticketId+" failed:",e.message); }
+      await new Promise(function(r2){setTimeout(r2,350);});
+    }
+
+    setCtfFixApplying(false); setCtfFixStatus("");
+    setCtfFixPreview(null);
+    addToast("CTF correction complete — "+done+" updated"+(approved?", "+approved+" dispute"+(approved!==1?"s":"")+" approved":"")+(failed?", "+failed+" failed":""));
   }
 
   // ── RECALCULATE FINAL PASSED ────────────────────────────────────────────────
@@ -7918,6 +8109,71 @@ Rules:
                       <p style={{margin:"0 0 4px",fontSize:"13px",fontWeight:600}}>Data Integrity</p>
                       <p style={{margin:"0 0 12px",fontSize:"12px",color:"var(--color-text-secondary)"}}>Recalculate Final Passed for all tickets based on current Final Score. Fixes pass/fail flags that are out of sync after disputes.</p>
                       <button onClick={recalcFinalPassed} style={{...btnInfo,fontSize:"12px"}}>Recalculate Final Passed</button>
+
+                      <div style={{marginTop:"20px",paddingTop:"16px",borderTop:"0.5px solid var(--color-border-tertiary)"}}>
+                        <p style={{margin:"0 0 4px",fontSize:"13px",fontWeight:600}}>One-time CTF correction</p>
+                        <p style={{margin:"0 0 10px",fontSize:"12px",color:"var(--color-text-secondary)"}}>
+                          Re-scores <strong>CTF Accuracy only</strong> for a week affected by the tag-visibility bug (fixed in v2.0.93). Other categories are untouched.
+                          Only ever <strong>raises</strong> a score — anything scoring lower is listed, not applied. Tickets whose CTF dispute a human already approved or rejected are skipped entirely.
+                          A pending CTF dispute the re-run supports is auto-approved; one it doesn't is left pending for you. Bypasses the Wednesday lock and logs every change to Reaudit History.
+                        </p>
+                        <div style={{display:"flex",gap:"8px",alignItems:"flex-end",flexWrap:"wrap",marginBottom:"10px"}}>
+                          <div>
+                            <label style={{...lbl,marginBottom:"4px"}}>Week</label>
+                            <select value={ctfFixWeek} onChange={function(e){setCtfFixWeek(e.target.value);setCtfFixPreview(null);}}
+                              style={{fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}>
+                              <option value="">Select week...</option>
+                              {[...new Set(tickets.map(function(t){return t.week;}).filter(Boolean))].sort().reverse().map(function(w){
+                                return <option key={w} value={w}>{w}</option>;
+                              })}
+                            </select>
+                          </div>
+                          <button onClick={runCtfFixPreview} disabled={ctfFixRunning||ctfFixApplying||!ctfFixWeek}
+                            style={{...btnInfo,fontSize:"12px",opacity:(ctfFixRunning||ctfFixApplying||!ctfFixWeek)?0.5:1}}>
+                            {ctfFixRunning?"Scanning...":"Preview changes"}
+                          </button>
+                          {(ctfFixRunning||ctfFixApplying)&&(
+                            <button onClick={function(){ctfFixStopRef.current=true;}} style={{...ghost,fontSize:"12px"}}>Stop</button>
+                          )}
+                        </div>
+                        {ctfFixStatus&&<p style={{margin:"0 0 10px",fontSize:"11px",color:"var(--color-text-info)"}}>{ctfFixStatus}</p>}
+
+                        {ctfFixPreview&&(
+                          <div style={{border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)",padding:"12px",background:"var(--color-background-secondary)"}}>
+                            <p style={{margin:"0 0 8px",fontSize:"12px",fontWeight:600}}>Preview — nothing written yet</p>
+                            <div style={{display:"flex",gap:"14px",flexWrap:"wrap",fontSize:"11px",marginBottom:"10px"}}>
+                              <span style={{color:"var(--color-text-success)"}}><strong>{ctfFixPreview.raise.length}</strong> will be raised</span>
+                              <span style={{color:"var(--color-text-warning)"}}><strong>{ctfFixPreview.lower.length}</strong> scored lower (skipped)</span>
+                              <span style={{color:"var(--color-text-secondary)"}}><strong>{ctfFixPreview.same.length}</strong> unchanged</span>
+                              <span style={{color:"var(--color-text-secondary)"}}><strong>{ctfFixPreview.skipped.length}</strong> skipped</span>
+                              {ctfFixPreview.errors.length>0&&<span style={{color:"var(--color-text-danger)"}}><strong>{ctfFixPreview.errors.length}</strong> errors</span>}
+                            </div>
+                            {ctfFixPreview.raise.length>0&&(
+                              <div style={{maxHeight:"180px",overflowY:"auto",marginBottom:"10px"}}>
+                                {ctfFixPreview.raise.map(function(r){
+                                  return <div key={r.t.ticketId} style={{fontSize:"11px",padding:"4px 0",borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
+                                    <strong>#{r.t.ticketId}</strong> {r.t.agentName} — CTF <span style={{color:"var(--color-text-danger)"}}>{r.oldLevel||"(none)"}</span> → <span style={{color:"var(--color-text-success)"}}>{r.newLevel}</span>
+                                    {r.dispute&&r.dispute.status==="pending"&&<span style={{color:"var(--color-text-info)"}}> · pending dispute</span>}
+                                  </div>;
+                                })}
+                              </div>
+                            )}
+                            {ctfFixPreview.lower.length>0&&(
+                              <div style={{marginBottom:"10px"}}>
+                                <p style={{margin:"0 0 4px",fontSize:"11px",fontWeight:600,color:"var(--color-text-warning)"}}>Scored lower — NOT applied, review manually:</p>
+                                {ctfFixPreview.lower.map(function(r){
+                                  return <div key={r.t.ticketId} style={{fontSize:"11px",color:"var(--color-text-secondary)"}}>#{r.t.ticketId} — {r.oldLevel} → {r.newLevel}</div>;
+                                })}
+                              </div>
+                            )}
+                            <button onClick={applyCtfFix} disabled={ctfFixApplying||ctfFixPreview.raise.length===0}
+                              style={{...btnSuccess,fontSize:"12px",opacity:(ctfFixApplying||ctfFixPreview.raise.length===0)?0.5:1}}>
+                              {ctfFixApplying?"Applying...":"Apply "+ctfFixPreview.raise.length+" correction"+(ctfFixPreview.raise.length!==1?"s":"")}
+                            </button>
+                            <button onClick={function(){setCtfFixPreview(null);}} style={{...ghost,fontSize:"12px",marginLeft:"6px"}}>Discard</button>
+                          </div>
+                        )}
+                      </div>
                       <div style={{marginTop:"20px",paddingTop:"16px",borderTop:"0.5px solid var(--color-border-tertiary)"}}>
                         <p style={{margin:"0 0 12px",fontSize:"12px",color:"var(--color-text-secondary)"}}>Export a debug log of recent activity and errors. Attach this when reporting an issue so it can be traced.</p>
                         <button onClick={function(){window.exportWingmanLog();addToast("Debug log exported");}} style={{...ghost,fontSize:"12px"}}>Export debug log</button>
