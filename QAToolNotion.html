@@ -2,10 +2,17 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.92
+  Version:  2.0.93
   Date:     2026-06-09
 
   Changelog:
+  v2.0.93 (2026-07-30) -- Fix: AI never saw Product / Ticket Resolution tags, so CTF Accuracy could never pass
+    - ROOT CAUSE: mapFetchedToQA() -- the handoff from Fetch to Batch QA -- hand-mapped only 8 fields and silently dropped product_l1/l2, ticket_resolution_l1/l2 and additional_resolution_l1/l2. buildEvalPrompt() then read undefined for those and printed "Product: not tagged" / "Ticket Resolution: not tagged" into the scoring prompt on EVERY fetched ticket. Contact Reason WAS mapped, which is exactly why that one field always read correctly while the other two always failed -- the AI was scoring the prompt it was given, accurately. This is separate from (and larger than) the v2.0.91 product_l2 fix, which only affected the CSV export path.
+    - mapFetchedToQA now delegates to mapRow(), which the CSV import path already used and which handles the identical snake_case key shape (the fetch row IS what gets exported to CSV). One mapping instead of two that can drift apart.
+    - Same bug in the re-audit path: its ticketObj also omitted the tag fields, and Notion does not persist raw tag values, so a re-audit could not recover them either. Re-audit now re-fetches the ticket from Gorgias and re-parses its custom fields, so it scores against the CURRENT tags -- picking up any tag corrected since the original audit. Non-fatal if that call fails: it logs and scores without tags rather than blocking the re-audit.
+    - Hoisted FIELD_CR / FIELD_PROD / FIELD_RES / FIELD_ADDRES out of the fetch loop to a single shared definition. They were local to the fetch function, which is structurally why re-audit had no way to read tags in the first place.
+    - Tickets already scored under the old behaviour keep their incorrect CTF scores until re-audited -- their saved justifications will read "Product and Ticket Resolution fields are both missing" even where the tags were present in Gorgias all along.
+
   v2.0.92 (2026-07-30) -- New fetch filter: assigned agent message count
     - New "Assigned agent msg count min" filter on the Fetch tab, beside the existing msg count min/max. Counts only PUBLIC replies sent by the ticket's ASSIGNED agent -- excludes customer messages, bot/Jamie replies from a different sender, and internal notes. Catches tickets that look busy on raw message count but have no actual agent interaction (all bot + customer), which would otherwise get audited and score as all-NA.
     - Matching is by Gorgias user ID (assignee_user.id vs sender.id) since that's stable; falls back to a normalizeAgentName() comparison only when the API doesn't return usable IDs on both sides.
@@ -742,7 +749,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 // The Python /proxy injects them server-side based on destination host.
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.92";
+const APP_VERSION = "v2.0.93";
 // ── Debug log buffer ─────────────────────────────────────────────────────────
 // Ring buffer of recent events + uncaught errors, so user-reported issues can be
 // traced. Export via the Settings tab button or exportWingmanLog() in the console.
@@ -2286,7 +2293,32 @@ function App() {
 
         // Step 2 — build transcript and score
         var transcript = buildTranscript(msgs);
-        var ticketObj = {
+        // Pull the ticket itself so CTF tags (Product / Ticket Resolution / Contact Reason)
+        // are available to the prompt. Notion doesn't persist the raw tag values, so without
+        // this re-fetch buildEvalPrompt would read undefined and print "not tagged" for every
+        // re-audit — scoring CTF Accuracy down regardless of how the ticket was actually tagged.
+        // Re-reading from Gorgias also means a tag corrected since the original audit is picked up.
+        var raTags = {};
+        try {
+          var raTicket = await gorgiasAPI("/tickets/"+rm.ticket.ticketId);
+          if(raTicket && !raTicket.error) {
+            var raCr = parseTicketField(raTicket, FIELD_CR);
+            var raProd = parseTicketField(raTicket, FIELD_PROD);
+            var raRes = parseTicketField(raTicket, FIELD_RES);
+            var raAdd = parseTicketField(raTicket, FIELD_ADDRES);
+            raTags = {
+              contactReasonL1: raCr[0], contactReasonL2: raCr[1],
+              productL1: raProd[0], productL2: raProd[1],
+              resolutionL1: raRes[0], resolutionL2: raRes[1],
+              addResolutionL1: raAdd[0], addResolutionL2: raAdd[1]
+            };
+            console.log("[Reaudit][2] Tags refreshed — product:", raProd.join("::"), "| resolution:", raRes.join("::"));
+          }
+        } catch(tagErr) {
+          // Non-fatal: fall through with no tags rather than blocking the re-audit outright.
+          console.log("[Reaudit][2] Tag refresh failed, scoring without CTF tags:", tagErr.message);
+        }
+        var ticketObj = Object.assign({
           ticketId:      rm.ticket.ticketId,
           ticketUrl:     rm.ticket.ticketUrl,
           agentName:     rm.ticket.agentName,
@@ -2296,7 +2328,7 @@ function App() {
           createdDate:   rm.ticket.createdDate,
           customerEmail: rm.ticket.customerEmail||"",
           reviewer:      rm.ticket.reviewer,
-        };
+        }, raTags);
         var rawTxt = await callClaudeWithRetry(buildEvalPrompt(ticketObj));
         console.log("[Reaudit][2] Claude response received");
         var cleanTxt = rawTxt.replace(/```(?:json)?\s*/g,"").replace(/```/g,"").trim();
@@ -3975,6 +4007,10 @@ Rules:
     }).length;
   }
 
+  // Gorgias custom-field IDs — single source of truth. These were previously declared
+  // inside the fetch loop only, which is how the re-audit path ended up unable to read tags.
+  var FIELD_CR=9969, FIELD_PROD=5807, FIELD_RES=11375, FIELD_ADDRES=11421;
+
   function parseTicketField(ticket, fieldId) {
     var cf = ticket.custom_fields || {};
     var val = cf[String(fieldId)];
@@ -4061,7 +4097,7 @@ Rules:
       var channelFilterActive = channels.length > 0 && channels.length < Object.keys(f.channels||{}).length;
       var crL1All = Object.keys(f.crL1||{}); var crL1Sel = crL1All.filter(function(k){return f.crL1[k];}).map(function(s){return s.toLowerCase();}); var crL1Active = crL1Sel.length > 0 && crL1Sel.length < crL1All.length;
       var crL2All = Object.keys(f.crL2||{}); var crL2Sel = crL2All.filter(function(k){return f.crL2[k];}).map(function(s){return s.toLowerCase();}); var crL2Active = crL2Sel.length > 0 && crL2Sel.length < crL2All.length;
-      var FIELD_CR=9969, FIELD_PROD=5807, FIELD_RES=11375, FIELD_ADDRES=11421;
+      // FIELD_CR / FIELD_PROD / FIELD_RES / FIELD_ADDRES are defined once near parseTicketField
 
       console.log("[QA][fetch] Date filter (client-side) \u2014 start:", since, "end:", until||"none");
       console.log("[QA][filter] Status:", filterByStatus ? activeStatuses.join(", ") : "all");
@@ -4327,18 +4363,16 @@ Rules:
     addToast("CSV downloaded");
   }
 
+  // The fetch output row uses the SAME snake_case keys as the CSV export (it IS what gets
+  // exported), so we delegate to mapRow rather than maintaining a second parallel mapping.
+  // This previously hand-mapped only 8 fields and silently dropped product_l1/l2,
+  // ticket_resolution_l1/l2 and additional_resolution_l1/l2 -- buildEvalPrompt then read
+  // undefined and printed "not tagged" for Product and Ticket Resolution on EVERY fetched
+  // ticket, so CTF Accuracy could never score above PARTIAL on the Fetch -> Batch QA path.
+  // Contact Reason was mapped, which is why that one field always read correctly.
+  // Delegating keeps the two ingest paths permanently in sync.
   function mapFetchedToQA(ticket) {
-    var cr = (ticket.contact_reason_l1||"") + (ticket.contact_reason_l2&&ticket.contact_reason_l2!=="N/A"?"::"+ticket.contact_reason_l2:"");
-    return {
-      ticketId:     ticket.ticket_id,
-      ticketUrl:    ticket.ticket_url,
-      agentName:    ticket.agent,
-      contactReason:cr,
-      customerEmail:ticket.customer_email,
-      createdDate:  ticket.created_date,
-      transcript:   ticket.transcript,
-      subject:      ticket.subject,
-    };
+    return mapRow(ticket);
   }
 
   async function runQAOnFetched(downloadCSV) {
