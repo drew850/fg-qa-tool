@@ -2,10 +2,21 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.94
+  Version:  2.0.95
   Date:     2026-06-09
 
   Changelog:
+  v2.0.95 (2026-09-11) -- New tab: Fetch v2 (warehouse-selected). Fetch Tickets is UNCHANGED and remains the fallback.
+    - Problem: picking N tickets per agent above an assigned-agent message threshold means Fetch v1 fetches messages for EVERY in-range ticket (one Gorgias call each, ~2,500/week), and most agents can't hit the threshold, so the whole pass gets re-run at 4, then 3, then 2. Hours per week.
+    - The Gorgias analytics warehouse (BigQuery, reachable via the Gorgias MCP server) answers "which tickets" in one query, tiered fallback included. Measured on Aug 31-Sep 6: only 12 of 27 agents had 6+ tickets at >=4 assigned-agent replies, but all 27 did at >=2 -- which is exactly why the re-runs were needed.
+    - Wingman CANNOT reach that warehouse itself: it authenticates to api.gorgias.com with basic auth via server.py, while the warehouse sits behind MCP OAuth, and PROXY_ALLOWED_HOSTS is locked to Notion + Anthropic. So Fetch v2 is a handoff, not a direct integration.
+    - Flow: pick week/target/preferred-min/floor -> Copy SQL -> run it in Claude with the Gorgias connector -> paste the ticket IDs back -> Wingman fetches exactly those from the live REST API. ~160 calls instead of ~10,000.
+    - The generated SQL counts assigned-agent PUBLIC replies only: excludes customer messages, bot messages (is_ai_agent_message), and internal notes via JSON_VALUE(m.source,'$.type') != 'internal-note'. Note: m.internal is NOT a boolean -- it holds JSON metadata; and filtering internal notes on channel alone misses ~1,100/week that ride on email/facebook/chat. QA staff (EXCLUDED_AGENT_NAMES) and Jamie are excluded in the query.
+    - ID paste box is tolerant of commas, spaces, newlines, quotes, leading '#', and whole pasted CSV rows. Dedupes. Live count of detected IDs.
+    - Per-ticket fetch reuses the existing pipeline unchanged (parseTicketField for CTF tags, buildTranscript, countAssignedAgentMessages) and emits the identical row shape as v1, so Run QA / CSV export / Notion save all work with no downstream changes.
+    - Skips previously-deleted tickets, optionally skips already-audited ones, skips QA-team agents and tickets with no usable transcript. 429 backoff with same-ticket retry. Stop button. Full skip-reason summary.
+    - LIMITATION: the warehouse refreshes roughly once daily, so Fetch v2 is for closed/past weeks. For same-day work use Fetch Tickets.
+
   v2.0.94 (2026-07-30) -- One-time CTF correction tool (Settings > Data Integrity, Full access only)
     - Remediates tickets scored before the v2.0.93 fix, where the AI never saw Product / Ticket Resolution tags and marked them "not tagged", depressing CTF Accuracy across the board.
     - Two-pass by design. PREVIEW pass is read-only: re-fetches each ticket's live tags from Gorgias (Notion never stored raw tag values), re-scores CTF ONLY via a focused single-category prompt, and buckets results into raise / lower / unchanged / skipped / errors. Nothing is written until you review and click Apply.
@@ -760,7 +771,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 // The Python /proxy injects them server-side based on destination host.
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.94";
+const APP_VERSION = "v2.0.95";
 // ── Debug log buffer ─────────────────────────────────────────────────────────
 // Ring buffer of recent events + uncaught errors, so user-reported issues can be
 // traced. Export via the Settings tab button or exportWingmanLog() in the console.
@@ -1640,7 +1651,7 @@ var btnSuccess = { background: "var(--color-background-success)", color: "var(--
 var ghost = { background: "transparent", color: "var(--color-text-secondary)", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", padding: "6px 14px", cursor: "pointer", fontSize: "13px" };
 var sectionLabel = { fontSize: "11px", fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.07em", color: "var(--color-text-secondary)", margin: "0 0 8px" };
 
-const NAV_TABS = [["fetch", "Fetch Tickets"], ["batch", "Batch QA"], ["manual", "Manual Audit"], ["dashboard", "Dashboard"], ["review", "Review"], ["myreports", "My Reports"], ["reports", "Reports"], ["matrix", "Matrix"], ["calibration", "Calibration"], ["teamcal", "Team Calibration"]];
+const NAV_TABS = [["fetch", "Fetch Tickets"], ["fetchv2", "Fetch v2"], ["batch", "Batch QA"], ["manual", "Manual Audit"], ["dashboard", "Dashboard"], ["review", "Review"], ["myreports", "My Reports"], ["reports", "Reports"], ["matrix", "Matrix"], ["calibration", "Calibration"], ["teamcal", "Team Calibration"]];
 
 const STATUS_OPTS = ["closed","open"];
 const CHANNEL_OPTS = ["api","chat","contact_form","email","facebook","facebook-messenger","help-center","instagram-ad-comment","instagram-comment","instagram-direct-message","sms"];
@@ -1773,6 +1784,17 @@ function App() {
   const [fetchStatus,setFetchStatus]=useState("");
   const [balanceReport,setBalanceReport]=useState(null);
   const [fetchedTickets,setFetchedTickets]=useState([]);
+  // ── Fetch v2 (warehouse-selected ticket IDs) ──
+  const [v2Week,setV2Week]=useState("");
+  const [v2Target,setV2Target]=useState("6");
+  const [v2MinAgentMsg,setV2MinAgentMsg]=useState("4");
+  const [v2FloorAgentMsg,setV2FloorAgentMsg]=useState("2");
+  const [v2IdInput,setV2IdInput]=useState("");
+  const [v2Running,setV2Running]=useState(false);
+  const [v2Status,setV2Status]=useState("");
+  const [v2Summary,setV2Summary]=useState(null);
+  const [v2SkipAudited,setV2SkipAudited]=useState(true);
+  const v2StopRef = React.useRef(false);
   const [fetchError,setFetchError]=useState("");
   const [showAdvancedFetch,setShowAdvancedFetch]=useState(false);
   const [showAgentDropdown,setShowAgentDropdown]=useState(false);
@@ -4562,6 +4584,172 @@ Rules:
   // ticket, so CTF Accuracy could never score above PARTIAL on the Fetch -> Batch QA path.
   // Contact Reason was mapped, which is why that one field always read correctly.
   // Delegating keeps the two ingest paths permanently in sync.
+  // ══════════════════════════════════════════════════════════════════════════
+  // FETCH V2 — warehouse-selected fetch.
+  // The Gorgias analytics warehouse (BigQuery, via the Gorgias MCP server) can
+  // work out WHICH tickets to audit in one query, including the tiered fallback
+  // that Fetch v1 forces you to discover by re-running at 4, then 3, then 2.
+  // Wingman can't reach that warehouse itself (it authenticates to
+  // api.gorgias.com with basic auth; the warehouse is behind MCP OAuth), so this
+  // is a handoff: generate the SQL -> run it in Claude -> paste the ticket IDs
+  // back here -> Wingman fetches exactly those from the live REST API.
+  // ~160 calls instead of ~10,000. Fetch v1 is untouched as the fallback.
+  // ══════════════════════════════════════════════════════════════════════════
+
+  function buildV2SQL() {
+    if(!v2Week) return "";
+    var mon = mnlMondayInstant(new Date(v2Week+"T00:00:00+08:00").getTime());
+    if(mon==null) return "";
+    var start = new Date(mon + MNL_MS), end = new Date(mon + 6*86400000 + MNL_MS);
+    function d(x){ return x.getUTCFullYear()+"-"+String(x.getUTCMonth()+1).padStart(2,"0")+"-"+String(x.getUTCDate()).padStart(2,"0"); }
+    var target = parseInt(v2Target||"6")||6;
+    var floor = parseInt(v2FloorAgentMsg||"2")||2;
+    var excl = EXCLUDED_AGENT_NAMES.concat(["Jamie"]).map(function(n){return "'"+n.replace(/'/g,"\\'")+"'";}).join(", ");
+    return "-- Wingman Fetch v2 — "+mnlWeekLabel(mon)+"\n"
+      +"-- Top "+target+" tickets per agent, ranked by assigned-agent public replies (floor "+floor+").\n"
+      +"WITH per_ticket AS (\n"
+      +"  SELECT\n"
+      +"    t.ticket_id,\n"
+      +"    t.assignee_user_id,\n"
+      +"    COUNTIF(\n"
+      +"      m.from_agent = TRUE\n"
+      +"      AND m.sender_id = t.assignee_user_id\n"
+      +"      AND JSON_VALUE(m.source, '$.type') != 'internal-note'\n"
+      +"      AND COALESCE(m.is_ai_agent_message, FALSE) = FALSE\n"
+      +"    ) AS agent_msgs\n"
+      +"  FROM gaia.tickets AS t\n"
+      +"  CROSS JOIN UNNEST(t.ticket_messages) AS m\n"
+      +"  WHERE t.ticket_created_date BETWEEN '"+d(start)+"' AND '"+d(end)+"'\n"
+      +"    AND COALESCE(t.is_spam, FALSE) = FALSE\n"
+      +"    AND t.assignee_user_id IS NOT NULL\n"
+      +"  GROUP BY 1, 2\n"
+      +"),\n"
+      +"ranked AS (\n"
+      +"  SELECT p.*, u.name AS agent_name,\n"
+      +"    ROW_NUMBER() OVER (PARTITION BY p.assignee_user_id ORDER BY p.agent_msgs DESC, p.ticket_id DESC) AS rn\n"
+      +"  FROM per_ticket AS p\n"
+      +"  LEFT JOIN gaia.users AS u ON u.gorgias_user_id = p.assignee_user_id\n"
+      +"  WHERE p.agent_msgs >= "+floor+"\n"
+      +"    AND COALESCE(u.name, '') NOT IN ("+excl+")\n"
+      +")\n"
+      +"SELECT STRING_AGG(CAST(ticket_id AS STRING), ',' ORDER BY agent_name) AS ticket_ids\n"
+      +"FROM ranked WHERE rn <= "+target+";\n"
+      +"-- Swap the final SELECT for this to eyeball it first:\n"
+      +"-- SELECT agent_name, ticket_id, agent_msgs FROM ranked WHERE rn <= "+target+" ORDER BY agent_name, agent_msgs DESC;";
+  }
+
+  function parseV2Ids(raw) {
+    if(!raw) return [];
+    // Tolerant: accepts commas, newlines, spaces, tabs, quotes, leading '#',
+    // and pasted CSV rows (grabs the longest digit run per line as the ID).
+    var out = [], seen = {};
+    raw.split(/[\s,;]+/).forEach(function(tok){
+      var m = String(tok).replace(/["'#]/g,"").match(/\d{4,}/);
+      if(m && !seen[m[0]]) { seen[m[0]] = 1; out.push(m[0]); }
+    });
+    return out;
+  }
+
+  async function runFetchV2() {
+    if(!isEditor) return;
+    var ids = parseV2Ids(v2IdInput);
+    if(!ids.length) { addToast("No ticket IDs found in that input","error"); return; }
+    if(ids.length > 600 && !window.confirm(ids.length+" ticket IDs — that's a large run. Continue?")) return;
+
+    setV2Running(true); v2StopRef.current = false; setV2Summary(null);
+    var fc = { requested: ids.length, fetched:0, skippedDeleted:0, skippedAudited:0,
+               skippedExcludedAgent:0, skippedNoTranscript:0, errors:0, rateLimited:false };
+    var results = [];
+    var auditedSet = v2SkipAudited
+      ? new Set(tickets.filter(function(t){return !t.deleted;}).map(function(t){return String(t.ticketId);}))
+      : new Set();
+
+    for(var i=0; i<ids.length; i++){
+      if(v2StopRef.current){ setV2Status("Stopped at "+i+" of "+ids.length); break; }
+      var tid = ids[i];
+      setV2Status("Fetching "+(i+1)+" of "+ids.length+" — #"+tid+" ("+results.length+" ready)");
+
+      if(deletedTicketIds.has(String(tid))) { fc.skippedDeleted++; continue; }
+      if(auditedSet.has(String(tid))) { fc.skippedAudited++; continue; }
+
+      try {
+        // 1. Ticket (tags, assignee, subject, status)
+        var t = await gorgiasAPI("/tickets/"+tid);
+        if(t && t._status === 429){
+          fc.rateLimited = true;
+          setV2Status("Rate limited — pausing 20s... ("+results.length+" ready)");
+          await new Promise(function(r){setTimeout(r,20000);});
+          i--; continue; // retry same ticket
+        }
+        if(!t || t.error || !t.id) { fc.errors++; continue; }
+
+        var agentName = "", agentId = null;
+        if(t.assignee_user){
+          var au = t.assignee_user;
+          agentName = normalizeAgentName(au.name || ((au.firstname||"")+" "+(au.lastname||"")).trim());
+          agentId = au.id != null ? String(au.id) : null;
+        }
+        if(agentName && EXCLUDED_AGENT_NAMES.includes(agentName)) { fc.skippedExcludedAgent++; continue; }
+
+        // 2. Messages (transcript + agent message count)
+        var msgs = [], gotMsgs = false;
+        for(var a=0; a<4; a++){
+          var mr = await gorgiasAPI("/tickets/"+tid+"/messages", {limit:100});
+          if(mr && mr._status === 429){
+            fc.rateLimited = true;
+            var w = [10000,20000,40000,60000][a];
+            setV2Status("Rate limited — pausing "+(w/1000)+"s... ("+results.length+" ready)");
+            await new Promise(function(r){setTimeout(r,w);});
+            continue;
+          }
+          msgs = (mr && mr.data) || []; gotMsgs = true; break;
+        }
+        if(!gotMsgs) { fc.errors++; fc.rateLimited = true; continue; }
+
+        var transcript = buildTranscript(msgs);
+        if(!transcript || transcript.trim().length < 20) { fc.skippedNoTranscript++; continue; }
+
+        var crP = parseTicketField(t, FIELD_CR), prP = parseTicketField(t, FIELD_PROD),
+            rsP = parseTicketField(t, FIELD_RES), adP = parseTicketField(t, FIELD_ADDRES);
+        var createdFmt = (t.created_datetime||"").slice(0,10);
+
+        results.push({
+          ticket_id:                String(tid),
+          ticket_url:               "https://"+((window.__ENV__&&window.__ENV__.GORGIAS_DOMAIN)||"freedomgrooming.gorgias.com")+"/app/ticket/"+tid,
+          subject:                  t.subject || "(no subject)",
+          status:                   t.status || "",
+          initial_channel:          t.channel || t.via || "",
+          created_date:             createdFmt,
+          agent:                    agentName,
+          customer_email:           (t.customer&&t.customer.email) || "",
+          contact_reason_l1:        crP[0],
+          contact_reason_l2:        crP[1],
+          product_l1:               prP[0],
+          product_l2:               prP[1],
+          ticket_resolution_l1:     rsP[0],
+          ticket_resolution_l2:     rsP[1],
+          additional_resolution_l1: adP[0],
+          additional_resolution_l2: adP[1],
+          message_count:            msgs.length,
+          agent_message_count:      countAssignedAgentMessages(msgs, agentId, agentName),
+          transcript:               transcript,
+        });
+        fc.fetched++;
+      } catch(e){ fc.errors++; console.error("[FetchV2] #"+tid+" failed:", e.message); }
+      await new Promise(function(r){setTimeout(r,250);});
+    }
+
+    fc.result = results.length;
+    setFetchedTickets(results);
+    setV2Summary(fc);
+    setV2Running(false);
+    setV2Status(results.length
+      ? "Done — "+results.length+" of "+ids.length+" ready for Run QA."+(fc.rateLimited?" (Rate-limited at some point — check the counts.)":"")
+      : "Done — nothing fetched. Check the skip counts below.");
+    if(results.length) addToast(results.length+" ticket"+(results.length!==1?"s":"")+" fetched — use Run QA below");
+    else addToast("Fetch v2 returned no tickets","error");
+  }
+
   function mapFetchedToQA(ticket) {
     return mapRow(ticket);
   }
@@ -5559,6 +5747,7 @@ Rules:
           if(!isFullAccess&&pair[0]==="matrix")return false;
           if(!isEditor&&pair[0]==="manual")return false;
           if(!isEditor&&pair[0]==="fetch")return false;
+          if(!isEditor&&pair[0]==="fetchv2")return false;
           if(!isFullAccess&&pair[0]==="calibration")return false;
           if(!isEditor&&pair[0]==="teamcal")return false;
           if(isViewOnly&&pair[0]==="reports")return false; // View users use My Reports tab
@@ -6738,6 +6927,147 @@ Rules:
                   </tbody>
                 </table>
                 {fetchedTickets.length>100&&<p style={{fontSize:"11px",color:"var(--color-text-secondary)",textAlign:"center",marginTop:"10px"}}>Showing first 100 of {fetchedTickets.length} — all will be included in CSV / QA run</p>}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── FETCH V2 TAB (warehouse-selected) ── */}
+      {view==="fetchv2"&&isEditor&&(
+        <div>
+          <div style={{...card,marginBottom:"16px"}}>
+            <p style={{margin:"0 0 2px",fontSize:"15px",fontWeight:600}}>Fetch v2 — warehouse-selected</p>
+            <p style={{margin:0,fontSize:"12px",color:"var(--color-text-secondary)"}}>
+              Let the Gorgias analytics warehouse pick the tickets, then fetch only those. It works out the tiered fallback
+              (target at your minimum, topping up from lower tiers) in one query, instead of you re-running Fetch at 4, then 3, then 2.
+              <strong> Fetch Tickets is untouched and remains the fallback.</strong>
+            </p>
+          </div>
+
+          <div style={{...card,marginBottom:"16px"}}>
+            <p style={{...sectionLabel,marginBottom:"10px"}}>Step 1 — Generate the query</p>
+            <div style={{display:"flex",gap:"10px",alignItems:"flex-end",flexWrap:"wrap",marginBottom:"10px"}}>
+              <div>
+                <label style={{...lbl,marginBottom:"4px"}}>Week (any day in it)</label>
+                <input type="date" value={v2Week} onChange={function(e){setV2Week(e.target.value);}}
+                  style={{fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+              </div>
+              <div>
+                <label style={{...lbl,marginBottom:"4px"}}>Per agent</label>
+                <input type="number" value={v2Target} onChange={function(e){setV2Target(e.target.value);}}
+                  style={{width:"70px",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+              </div>
+              <div>
+                <label style={{...lbl,marginBottom:"4px"}}>Preferred min</label>
+                <input type="number" value={v2MinAgentMsg} onChange={function(e){setV2MinAgentMsg(e.target.value);}}
+                  style={{width:"70px",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+              </div>
+              <div>
+                <label style={{...lbl,marginBottom:"4px"}}>Floor</label>
+                <input type="number" value={v2FloorAgentMsg} onChange={function(e){setV2FloorAgentMsg(e.target.value);}}
+                  style={{width:"70px",fontSize:"12px",padding:"6px 8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)"}}/>
+              </div>
+              <button onClick={function(){
+                var sql = buildV2SQL();
+                if(!sql){ addToast("Pick a week first","error"); return; }
+                navigator.clipboard.writeText(sql).then(function(){ addToast("SQL copied — paste it to Claude with Gorgias connected"); },
+                  function(){ addToast("Couldn't copy — select it below manually","error"); });
+              }} disabled={!v2Week} style={{...btnInfo,opacity:!v2Week?0.5:1}}>Copy SQL</button>
+            </div>
+            <p style={{fontSize:"11px",color:"var(--color-text-secondary)",margin:"0 0 8px"}}>
+              Ranks each agent's tickets by assigned-agent public replies (internal notes and bot messages excluded) and takes the top N — so agents who
+              can't reach your preferred minimum are automatically topped up from lower tiers, down to the floor. QA staff and Jamie are excluded.
+            </p>
+            {v2Week&&(
+              <textarea readOnly value={buildV2SQL()} onClick={function(e){e.target.select();}}
+                style={{width:"100%",boxSizing:"border-box",height:"120px",fontFamily:"ui-monospace,Menlo,monospace",fontSize:"10.5px",lineHeight:"1.5",
+                        padding:"8px",border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-md)",
+                        background:"var(--color-background-secondary)",color:"var(--color-text-secondary)",resize:"vertical"}}/>
+            )}
+          </div>
+
+          <div style={{...card,marginBottom:"16px"}}>
+            <p style={{...sectionLabel,marginBottom:"6px"}}>Step 2 — Paste the ticket IDs</p>
+            <p style={{fontSize:"11px",color:"var(--color-text-secondary)",margin:"0 0 8px"}}>
+              Run the query in Claude with the Gorgias connector on, then paste the result here. Commas, spaces, newlines, or whole CSV rows all work.
+            </p>
+            <textarea value={v2IdInput} onChange={function(e){setV2IdInput(e.target.value);}}
+              placeholder="461702447, 461377728, 461381139, ..."
+              style={{width:"100%",boxSizing:"border-box",height:"90px",fontFamily:"ui-monospace,Menlo,monospace",fontSize:"11.5px",
+                      padding:"8px",border:"0.5px solid var(--color-border-secondary)",borderRadius:"var(--border-radius-md)",resize:"vertical",marginBottom:"10px"}}/>
+            <div style={{display:"flex",gap:"10px",alignItems:"center",flexWrap:"wrap"}}>
+              <span style={{fontSize:"12px",fontWeight:600,color:parseV2Ids(v2IdInput).length?"var(--color-text-success)":"var(--color-text-secondary)"}}>
+                {parseV2Ids(v2IdInput).length} unique ID{parseV2Ids(v2IdInput).length!==1?"s":""} detected
+              </span>
+              <label style={{display:"flex",alignItems:"center",gap:"6px",fontSize:"12px",cursor:"pointer"}}>
+                <input type="checkbox" checked={v2SkipAudited} onChange={function(e){setV2SkipAudited(e.target.checked);}}/>
+                Skip already-audited tickets
+              </label>
+              <button onClick={runFetchV2} disabled={v2Running||!parseV2Ids(v2IdInput).length}
+                style={{...btnSuccess,opacity:(v2Running||!parseV2Ids(v2IdInput).length)?0.5:1}}>
+                {v2Running?"Fetching...":"Fetch these tickets"}
+              </button>
+              {v2Running&&<button onClick={function(){v2StopRef.current=true;}} style={ghost}>Stop</button>}
+            </div>
+            {v2Status&&<p style={{fontSize:"12px",color:"var(--color-text-info)",margin:"10px 0 0"}}>{v2Status}</p>}
+          </div>
+
+          {v2Summary&&(
+            <div style={{...card,marginBottom:"16px"}}>
+              <p style={{...sectionLabel,marginBottom:"10px"}}>Run summary</p>
+              <div style={{display:"flex",gap:"16px",flexWrap:"wrap",fontSize:"12px"}}>
+                {[
+                  {label:"Requested",val:v2Summary.requested,color:null},
+                  {label:"Fetched",val:v2Summary.fetched,color:"var(--color-text-success)"},
+                  {label:"Skipped — already audited",val:v2Summary.skippedAudited,color:v2Summary.skippedAudited>0?"var(--color-text-warning)":null},
+                  {label:"Skipped — previously deleted",val:v2Summary.skippedDeleted,color:v2Summary.skippedDeleted>0?"var(--color-text-warning)":null},
+                  {label:"Skipped — QA team agent",val:v2Summary.skippedExcludedAgent,color:v2Summary.skippedExcludedAgent>0?"var(--color-text-warning)":null},
+                  {label:"Skipped — no transcript",val:v2Summary.skippedNoTranscript,color:v2Summary.skippedNoTranscript>0?"var(--color-text-warning)":null},
+                  {label:"Errors",val:v2Summary.errors,color:v2Summary.errors>0?"var(--color-text-danger)":null},
+                ].map(function(r){
+                  return <div key={r.label}><span style={{color:"var(--color-text-secondary)"}}>{r.label}: </span>
+                    <strong style={r.color?{color:r.color}:{}}>{r.val}</strong></div>;
+                })}
+              </div>
+              {v2Summary.rateLimited&&(
+                <p style={{fontSize:"11px",color:"var(--color-text-warning)",margin:"10px 0 0"}}>
+                  Gorgias rate-limited part of this run — it backed off and retried, but double-check the fetched count against what you pasted.
+                </p>
+              )}
+            </div>
+          )}
+
+          {fetchedTickets.length>0&&(
+            <div style={card}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:"14px",flexWrap:"wrap",gap:"8px"}}>
+                <p style={{...sectionLabel,margin:0}}>Ready — {fetchedTickets.length} ticket{fetchedTickets.length!==1?"s":""}</p>
+                <div style={{display:"flex",gap:"8px"}}>
+                  <button onClick={downloadFetchedCSV} style={{...ghost,fontSize:"12px"}}>⬇ Save as CSV</button>
+                  <button onClick={function(){runQAOnFetched(false);}} style={{...btnInfo,fontSize:"12px"}}>▶ Run QA</button>
+                  <button onClick={function(){runQAOnFetched(true);}} style={{...btnSuccess,fontSize:"12px"}}>⬇ CSV + ▶ Run QA</button>
+                </div>
+              </div>
+              <div style={{overflowX:"auto",maxHeight:"420px"}}>
+                <table style={{width:"100%",borderCollapse:"collapse",fontSize:"12px"}}>
+                  <thead><tr style={{background:"var(--color-background-secondary)"}}>
+                    {["Ticket","Agent","Agent msgs","Contact Reason","Channel"].map(function(h){
+                      return <th key={h} style={{padding:"7px 10px",textAlign:"left",fontSize:"10px",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.07em",color:"var(--color-text-secondary)",borderBottom:"0.5px solid var(--color-border-tertiary)",whiteSpace:"nowrap"}}>{h}</th>;
+                    })}
+                  </tr></thead>
+                  <tbody>
+                    {fetchedTickets.slice(0,100).map(function(r){
+                      return <tr key={r.ticket_id} style={{borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
+                        <td style={{padding:"6px 10px",color:"var(--color-text-info)",whiteSpace:"nowrap"}}>{r.ticket_id}</td>
+                        <td style={{padding:"6px 10px",whiteSpace:"nowrap"}}>{r.agent||"—"}</td>
+                        <td style={{padding:"6px 10px",textAlign:"center",fontWeight:600}}>{r.agent_message_count}</td>
+                        <td style={{padding:"6px 10px"}}>{[r.contact_reason_l1,r.contact_reason_l2].filter(Boolean).join("::")||"—"}</td>
+                        <td style={{padding:"6px 10px",whiteSpace:"nowrap"}}>{r.initial_channel||"—"}</td>
+                      </tr>;
+                    })}
+                  </tbody>
+                </table>
+                {fetchedTickets.length>100&&<p style={{fontSize:"11px",color:"var(--color-text-secondary)",textAlign:"center",marginTop:"10px"}}>Showing first 100 of {fetchedTickets.length} — all included in CSV / QA run</p>}
               </div>
             </div>
           )}
