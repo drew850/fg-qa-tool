@@ -2,10 +2,16 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.97
+  Version:  2.0.98
   Date:     2026-09-15
 
   Changelog:
+  v2.0.98 (2026-09-15) -- HOTFIX: white screen / TypeError on login after v2.0.97
+    - "TypeError: Cannot read properties of undefined (reading 'filter')" thrown from excludedAgentUsers() during first render, crashing the app right after the user list loaded.
+    - Cause: excludedAgentUsers() read `effectiveUsers`, but the agents-dropdown list (a top-level statement in the component body, ~line 2081) is evaluated BEFORE `var effectiveUsers` is assigned (~line 4185). `var` hoists the declaration without the value, so it was undefined at call time. Other references to effectiveUsers sit inside function bodies or JSX, which evaluate after the body completes, so only this one broke.
+    - Fix: added userPool(), which resolves through userList (useState, initialized early) with a hardcodedUsersArray() fallback (a hoisted function declaration, safe anywhere). excludedAgentUsers() and assignableAuditors() now both use it and never touch effectiveUsers.
+    - No behavioural change beyond not crashing — exclusion and assignment logic are identical to v2.0.97.
+
   v2.0.97 (2026-09-15) -- Excluded agents moved to Notion + matched on EMAIL instead of display name
     - New "Exclude Their Tickets" checkbox per user (QA Users DB + the in-app user table). Ticking it means that person's own Gorgias tickets are never pulled for audit. Manage it in Notion or in-app; no deploy needed.
     - ROOT CAUSE FIX: EXCLUDED_AGENT_NAMES matched on display name, but the QA Users DB and Gorgias spell the same people differently -- Jero vs "Jero M.", Naomi vs "Naomi O.", Drew vs "Drew T". Only Jean T. and Marco O. happened to match, so THREE of the five were never actually excluded and their tickets have been eligible for audit since v2.0.84.
@@ -788,7 +794,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 // The Python /proxy injects them server-side based on destination host.
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.97";
+const APP_VERSION = "v2.0.98";
 // ── Debug log buffer ─────────────────────────────────────────────────────────
 // Ring buffer of recent events + uncaught errors, so user-reported issues can be
 // traced. Export via the Settings tab button or exportWingmanLog() in the console.
@@ -4194,8 +4200,17 @@ Rules:
   // "Exclude Their Tickets" checkbox. Matched on EMAIL, which is identical on both
   // sides, rather than display name, which is not (Jero vs Jero M., Naomi vs Naomi O.,
   // Drew vs Drew T). Falls back to the static list only if Notion never loaded.
+  // NOTE: do NOT use `effectiveUsers` in here. The agents dropdown list is computed
+  // earlier in the component body than `effectiveUsers` is assigned, and `var` hoists
+  // the declaration without the value — so it reads as undefined and throws on .filter().
+  // userList (useState) and hardcodedUsersArray (hoisted function decl) are both safe
+  // at any point in the body, so resolve the pool through this instead.
+  function userPool() {
+    return (userList && userList.length) ? userList : hardcodedUsersArray();
+  }
+
   function excludedAgentUsers() {
-    var flagged = effectiveUsers.filter(function(u){ return u.excludeTickets === true; });
+    var flagged = userPool().filter(function(u){ return u.excludeTickets === true; });
     if(flagged.length) return flagged;
     if(!userList.length) return EXCLUDED_AGENT_NAMES.map(function(n){ return {name:n, email:""}; });
     return [];
@@ -4216,7 +4231,7 @@ Rules:
   }
 
   function assignableAuditors() {
-    return effectiveUsers.filter(function(u){
+    return userPool().filter(function(u){
       return (u.role === "full" || u.role === "edit")
         && u.active !== false
         && u.assignAudits !== false;
