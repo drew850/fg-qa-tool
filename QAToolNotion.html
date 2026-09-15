@@ -2,10 +2,19 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.96
-  Date:     2026-06-09
+  Version:  2.0.97
+  Date:     2026-09-15
 
   Changelog:
+  v2.0.97 (2026-09-15) -- Excluded agents moved to Notion + matched on EMAIL instead of display name
+    - New "Exclude Their Tickets" checkbox per user (QA Users DB + the in-app user table). Ticking it means that person's own Gorgias tickets are never pulled for audit. Manage it in Notion or in-app; no deploy needed.
+    - ROOT CAUSE FIX: EXCLUDED_AGENT_NAMES matched on display name, but the QA Users DB and Gorgias spell the same people differently -- Jero vs "Jero M.", Naomi vs "Naomi O.", Drew vs "Drew T". Only Jean T. and Marco O. happened to match, so THREE of the five were never actually excluded and their tickets have been eligible for audit since v2.0.84.
+    - Matching now uses EMAIL, which is byte-identical on both sides (verified against gaia.users) and is already the QA Users DB primary key, so display-name edits on either side can no longer silently break exclusion. Name matching survives only as a backstop for assignees with no email on the Gorgias record.
+    - Applied at all four sites: the v1 fetch loop, the Fetch v2 loop, the generated Fetch v2 SQL (now "LOWER(u.email) NOT IN (...)" rather than a name list), and the agent filter dropdown.
+    - The static EXCLUDED_AGENT_NAMES constant remains ONLY as a fallback for when the user list can't load from Notion, and its entries were corrected to the Gorgias spellings.
+    - Jamie stays excluded by name in the SQL -- it's a bot, not a QA Users record, so it has no email to key off.
+    - REQUIRES SETUP: add an "Exclude Their Tickets" (Checkbox) property to the QA Users DB, then tick it for Jean T., Jero, Marco O., Naomi and Drew. Adding a new user writes to this property, so that write fails if the column does not exist.
+
   v2.0.96 (2026-09-15) -- "Assign Audits" per-user toggle + fix: deactivated users were still being assigned tickets
     - New "Assign Audits" checkbox per user (QA Users DB + the in-app user table). Unchecking it keeps the user's Full/Edit access and all their permissions, but stops them receiving round-robin assignments and Team Calibration tickets. Toggle it in-app or in Notion; no deploy needed to add or remove an auditor.
     - Defaults to TRUE when the property is absent, mirroring the existing "Active" pattern, so every current user keeps their present behaviour and only the people you explicitly untick are excluded.
@@ -779,7 +788,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 // The Python /proxy injects them server-side based on destination host.
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.96";
+const APP_VERSION = "v2.0.97";
 // ── Debug log buffer ─────────────────────────────────────────────────────────
 // Ring buffer of recent events + uncaught errors, so user-reported issues can be
 // traced. Export via the Settings tab button or exportWingmanLog() in the console.
@@ -810,7 +819,13 @@ const WINGMAN_LOGO = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAQ
 }); }catch(e){} })();
 const REPORTS_DB_ID = "3684e96c994180db8929c67f306c554a";
 // QA team members — never auditable as CX agents, even if they historically had an agentName tag
-const EXCLUDED_AGENT_NAMES = ["Jean T.","Jero","Marco O.","Naomi","Drew"];
+// FALLBACK ONLY. The real exclusion list is driven by the "Exclude Their Tickets"
+// checkbox in the QA Users DB and matched on EMAIL (see excludedAgentEmails()).
+// This is used only when the user list can't be loaded from Notion.
+// Names here are the GORGIAS spellings, which differ from the QA Users DB Name field
+// for several people (Jero M. vs Jero, Naomi O. vs Naomi, Drew T vs Drew) -- that
+// mismatch is exactly why name matching was replaced with email matching.
+const EXCLUDED_AGENT_NAMES = ["Jean T.","Jero M.","Marco O.","Naomi O.","Drew T","Drew"];
 const AGENT_LIST = ["Anna","Anthony M","Arvin R","Cristine T.","Daniel F","Djac D.G.","Edward A","Geal Ann L.","Gerry P.","Hans G.","Jamie","Jan C.","Jann G.","Jean T.","Jenn S","Joanna L","Julius T.","Karl L.","Keo H.","Khate P","Kristianne M.","Kristine D.V.","Macy F.","Marco O.","Maria C.","Mariel C","May L.","Miguel D","Milton R.","Nicole G.","Sonia C.","Vincent B."].filter(function(a){return !EXCLUDED_AGENT_NAMES.includes(a);});
 // Collapses NBSP/double-space/leading-trailing whitespace so the same person never gets
 // split into two "different" agents (e.g. "Maria C." vs "Maria C. " from a Gorgias display-name edit).
@@ -2063,7 +2078,7 @@ function App() {
     return t.week===week;
   });
   var currentAuditWeek=week;
-  var agents=[...new Set(tickets.map(function(t){return t.agentName;}).filter(Boolean))].filter(function(a){return !EXCLUDED_AGENT_NAMES.includes(a);}).sort();
+  var agents=[...new Set(tickets.map(function(t){return t.agentName;}).filter(Boolean))].filter(function(a){return !isExcludedAssignee("",a);}).sort();
 
   function addToast(msg,type){
     var id=Date.now()+Math.random();
@@ -4062,11 +4077,14 @@ Rules:
           // property is absent so existing users keep their current behaviour.
           var assignVal = (props["Assign Audits"]||{}).checkbox;
           var assignAudits = assignVal !== false;
+          // "Exclude Their Tickets" — this person's own Gorgias tickets are never
+          // pulled for audit (QA staff auditing themselves). Defaults FALSE when absent.
+          var excludeTickets = (props["Exclude Their Tickets"]||{}).checkbox === true;
           var notesArr = (props.Notes||{}).rich_text||[];
           var notes = notesArr[0]&&notesArr[0].text ? notesArr[0].text.content.trim() : "";
           if(email) users.push({
             notionPageId: page.id,
-            email, name: name||email.split("@")[0], role, active, assignAudits, notes,
+            email, name: name||email.split("@")[0], role, active, assignAudits, excludeTickets, notes,
             agentName: name // display_name = Gorgias agent name by convention
           });
         });
@@ -4100,6 +4118,7 @@ Rules:
       "Role":  {rich_text:[{text:{content:userData.role}}]},
       "Active":{checkbox:true},
       "Assign Audits":{checkbox: userData.assignAudits !== false},
+      "Exclude Their Tickets":{checkbox: userData.excludeTickets === true},
     };
     if(userData.notes) props["Notes"] = {rich_text:[{text:{content:userData.notes}}]};
     await notionAPI("/v1/pages","POST",{parent:{database_id:dbId},properties:props});
@@ -4111,6 +4130,7 @@ Rules:
     if(fields.role  !== undefined) props["Role"]   = {rich_text:[{text:{content:fields.role}}]};
     if(fields.active!== undefined) props["Active"] = {checkbox:fields.active};
     if(fields.assignAudits !== undefined) props["Assign Audits"] = {checkbox:fields.assignAudits};
+    if(fields.excludeTickets !== undefined) props["Exclude Their Tickets"] = {checkbox:fields.excludeTickets};
     if(fields.notes !== undefined) props["Notes"]  = {rich_text:[{text:{content:fields.notes}}]};
     await notionAPI("/v1/pages/"+notionPageId,"PATCH",{properties:props});
   }
@@ -4170,6 +4190,31 @@ Rules:
   // Excludes: non-auditor roles, deactivated users (previously only blocked at login,
   // so they still got tickets round-robined to them that nobody could open), and
   // anyone with "Assign Audits" unchecked in the QA Users DB.
+  // Whose Gorgias tickets should never be audited — driven by the QA Users DB
+  // "Exclude Their Tickets" checkbox. Matched on EMAIL, which is identical on both
+  // sides, rather than display name, which is not (Jero vs Jero M., Naomi vs Naomi O.,
+  // Drew vs Drew T). Falls back to the static list only if Notion never loaded.
+  function excludedAgentUsers() {
+    var flagged = effectiveUsers.filter(function(u){ return u.excludeTickets === true; });
+    if(flagged.length) return flagged;
+    if(!userList.length) return EXCLUDED_AGENT_NAMES.map(function(n){ return {name:n, email:""}; });
+    return [];
+  }
+  function excludedAgentEmails() {
+    return excludedAgentUsers().map(function(u){ return (u.email||"").toLowerCase().trim(); }).filter(Boolean);
+  }
+  function excludedAgentNames() {
+    return excludedAgentUsers().map(function(u){ return normalizeAgentName(u.name||""); }).filter(Boolean);
+  }
+  // True when this Gorgias assignee should be skipped. Email is authoritative; the
+  // name check is a backstop for assignees with no email on the Gorgias record.
+  function isExcludedAssignee(email, name) {
+    var e = (email||"").toLowerCase().trim();
+    if(e && excludedAgentEmails().indexOf(e) !== -1) return true;
+    var n = normalizeAgentName(name||"");
+    return !!n && excludedAgentNames().indexOf(n) !== -1;
+  }
+
   function assignableAuditors() {
     return effectiveUsers.filter(function(u){
       return (u.role === "full" || u.role === "edit")
@@ -4424,13 +4469,15 @@ Rules:
 
           var agentName = "";
           var agentId = null;
+          var agentEmail = "";
           if(t.assignee_user) {
             var au = t.assignee_user;
             agentName = normalizeAgentName(au.name || ((au.firstname||"")+" "+(au.lastname||"")).trim());
             agentId = au.id != null ? String(au.id) : null;
+            agentEmail = (au.email||"").toLowerCase().trim();
           }
 
-          if(agentName && EXCLUDED_AGENT_NAMES.includes(agentName)) {
+          if(isExcludedAssignee(agentEmail, agentName)) {
             fc.skippedExcludedAgent++; fdbg(tid,"SKIP excluded agent: '"+agentName+"' is QA team, not auditable"); continue;
           }
 
@@ -4633,7 +4680,8 @@ Rules:
     function d(x){ return x.getUTCFullYear()+"-"+String(x.getUTCMonth()+1).padStart(2,"0")+"-"+String(x.getUTCDate()).padStart(2,"0"); }
     var target = parseInt(v2Target||"6")||6;
     var floor = parseInt(v2FloorAgentMsg||"2")||2;
-    var excl = EXCLUDED_AGENT_NAMES.concat(["Jamie"]).map(function(n){return "'"+n.replace(/'/g,"\\'")+"'";}).join(", ");
+    var exclEmails = excludedAgentEmails().map(function(e){return "'"+e.replace(/'/g,"\\'")+"'";}).join(", ");
+    if(!exclEmails) exclEmails = "''"; // no-op IN() list
     return "-- Wingman Fetch v2 — "+mnlWeekLabel(mon)+"\n"
       +"-- Top "+target+" tickets per agent, ranked by assigned-agent public replies (floor "+floor+").\n"
       +"WITH per_ticket AS (\n"
@@ -4659,7 +4707,8 @@ Rules:
       +"  FROM per_ticket AS p\n"
       +"  LEFT JOIN gaia.users AS u ON u.gorgias_user_id = p.assignee_user_id\n"
       +"  WHERE p.agent_msgs >= "+floor+"\n"
-      +"    AND COALESCE(u.name, '') NOT IN ("+excl+")\n"
+      +"    AND LOWER(COALESCE(u.email, '')) NOT IN ("+exclEmails+")\n"
+      +"    AND COALESCE(u.name, '') != 'Jamie'\n"
       +")\n"
       +"SELECT STRING_AGG(CAST(ticket_id AS STRING), ',' ORDER BY agent_name) AS ticket_ids\n"
       +"FROM ranked WHERE rn <= "+target+";\n"
@@ -4712,13 +4761,14 @@ Rules:
         }
         if(!t || t.error || !t.id) { fc.errors++; continue; }
 
-        var agentName = "", agentId = null;
+        var agentName = "", agentId = null, agentEmail = "";
         if(t.assignee_user){
           var au = t.assignee_user;
           agentName = normalizeAgentName(au.name || ((au.firstname||"")+" "+(au.lastname||"")).trim());
           agentId = au.id != null ? String(au.id) : null;
+          agentEmail = (au.email||"").toLowerCase().trim();
         }
-        if(agentName && EXCLUDED_AGENT_NAMES.includes(agentName)) { fc.skippedExcludedAgent++; continue; }
+        if(isExcludedAssignee(agentEmail, agentName)) { fc.skippedExcludedAgent++; continue; }
 
         // 2. Messages (transcript + agent message count)
         var msgs = [], gotMsgs = false;
@@ -8390,8 +8440,8 @@ Rules:
                     </div>
                     <div style={{border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-lg)",overflow:"hidden"}}>
                       {/* Table header */}
-                      <div style={{display:"grid",gridTemplateColumns:"1fr 140px 100px 90px 80px",gap:"0",padding:"8px 14px",background:"var(--color-background-secondary)",borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
-                        {["Name / Email","Agent Name","Role","Assign audits",""].map(function(h,i){return <span key={i} style={{fontSize:"10px",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.07em",color:"var(--color-text-secondary)"}}>{h}</span>;})}
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 140px 100px 90px 105px 80px",gap:"0",padding:"8px 14px",background:"var(--color-background-secondary)",borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
+                        {["Name / Email","Agent Name","Role","Assign audits","Skip their tickets",""].map(function(h,i){return <span key={i} style={{fontSize:"10px",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.07em",color:"var(--color-text-secondary)"}}>{h}</span>;})}
                       </div>
                       {/* Rows */}
                       {userList.length===0&&(
@@ -8401,7 +8451,7 @@ Rules:
                         var initials=u.name.split(" ").map(function(w){return w[0];}).join("").slice(0,2).toUpperCase();
                         var isCurrentUser=currentUser&&u.email===currentUser.email;
                         return(
-                          <div key={u.email} style={{display:"grid",gridTemplateColumns:"1fr 140px 100px 90px 80px",gap:"0",padding:"12px 14px",borderBottom:idx<userList.length-1?"0.5px solid var(--color-border-tertiary)":"none",alignItems:"center",background:isCurrentUser?"var(--color-background-info)":"transparent"}}>
+                          <div key={u.email} style={{display:"grid",gridTemplateColumns:"1fr 140px 100px 90px 105px 80px",gap:"0",padding:"12px 14px",borderBottom:idx<userList.length-1?"0.5px solid var(--color-border-tertiary)":"none",alignItems:"center",background:isCurrentUser?"var(--color-background-info)":"transparent"}}>
                             {/* Name + email */}
                             <div style={{display:"flex",alignItems:"center",gap:"10px"}}>
                               <div style={{width:"30px",height:"30px",borderRadius:"50%",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"11px",fontWeight:700,color:"var(--color-text-secondary)",flexShrink:0}}>
@@ -8465,6 +8515,22 @@ Rules:
                                   </span>
                                 )
                               ):(<span style={{fontSize:"11px",color:"var(--color-text-secondary)"}}>—</span>)}
+                            </div>
+                            {/* Skip their tickets — never audit this person's own Gorgias tickets */}
+                            <div>
+                              {isFullAccess?(
+                                <label style={{display:"flex",alignItems:"center",gap:"5px",fontSize:"11px",cursor:"pointer"}}>
+                                  <input type="checkbox" checked={u.excludeTickets===true}
+                                    onChange={function(e){updateUserField(u.email,"excludeTickets",e.target.checked);}}/>
+                                  <span style={{color:u.excludeTickets===true?"var(--color-text-warning)":"var(--color-text-secondary)"}}>
+                                    {u.excludeTickets===true?"Skipped":"—"}
+                                  </span>
+                                </label>
+                              ):(
+                                <span style={{fontSize:"11px",color:u.excludeTickets===true?"var(--color-text-warning)":"var(--color-text-secondary)"}}>
+                                  {u.excludeTickets===true?"Skipped":"—"}
+                                </span>
+                              )}
                             </div>
                             {/* Remove */}
                             <div style={{textAlign:"right"}}>
