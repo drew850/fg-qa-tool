@@ -2,10 +2,18 @@
 <!--
   Freedom Grooming QA Tool
   ========================
-  Version:  2.0.95
+  Version:  2.0.96
   Date:     2026-06-09
 
   Changelog:
+  v2.0.96 (2026-09-15) -- "Assign Audits" per-user toggle + fix: deactivated users were still being assigned tickets
+    - New "Assign Audits" checkbox per user (QA Users DB + the in-app user table). Unchecking it keeps the user's Full/Edit access and all their permissions, but stops them receiving round-robin assignments and Team Calibration tickets. Toggle it in-app or in Notion; no deploy needed to add or remove an auditor.
+    - Defaults to TRUE when the property is absent, mirroring the existing "Active" pattern, so every current user keeps their present behaviour and only the people you explicitly untick are excluded.
+    - FIX: the "Active" flag was only enforced at LOGIN -- it never filtered the assignment pool. A deactivated user could not sign in but was still round-robined tickets, which then sat unowned with no one able to open them. Deactivated users are now excluded from assignment too.
+    - Consolidated three separate copies of the "who is an auditor" filter (CSV upload round-robin, Fetch -> Batch QA round-robin, Team Calibration participants) into one assignableAuditors() helper. Three copies of the same filter drifting apart is exactly how the FIELD_CR bug happened.
+    - The Review tab's Auditor filter dropdown deliberately still lists ALL Full/Edit users, including excluded and deactivated ones, so historical audits stay filterable by whoever actually did them.
+    - REQUIRES SETUP: add an "Assign Audits" (Checkbox) property to the QA Users DB before deploying. Adding a new user writes to this property, so that write will fail if the column does not exist yet.
+
   v2.0.95 (2026-09-11) -- New tab: Fetch v2 (warehouse-selected). Fetch Tickets is UNCHANGED and remains the fallback.
     - Problem: picking N tickets per agent above an assigned-agent message threshold means Fetch v1 fetches messages for EVERY in-range ticket (one Gorgias call each, ~2,500/week), and most agents can't hit the threshold, so the whole pass gets re-run at 4, then 3, then 2. Hours per week.
     - The Gorgias analytics warehouse (BigQuery, reachable via the Gorgias MCP server) answers "which tickets" in one query, tiered fallback included. Measured on Aug 31-Sep 6: only 12 of 27 agents had 6+ tickets at >=4 assigned-agent replies, but all 27 did at >=2 -- which is exactly why the re-runs were needed.
@@ -771,7 +779,7 @@ const { useState, useEffect, useRef, useCallback } = React;
 // The Python /proxy injects them server-side based on destination host.
 const NOTION_VERSION = "2022-06-28";
 
-const APP_VERSION = "v2.0.95";
+const APP_VERSION = "v2.0.96";
 // ── Debug log buffer ─────────────────────────────────────────────────────────
 // Ring buffer of recent events + uncaught errors, so user-reported issues can be
 // traced. Export via the Settings tab button or exportWingmanLog() in the console.
@@ -2577,7 +2585,7 @@ function App() {
       if(!mapped.length){addToast("No tickets with transcripts found. Use the CSV from the Gorgias Python script.","error");return;}
 
       // Auto-assign evenly across all Full+Edit users (from live user list)
-      var assignable=effectiveUsers.filter(function(u){return u.role==="full"||u.role==="edit";}).map(function(u){return u.name;});
+      var assignable=assignableAuditors().map(function(u){return u.name;});
       if(assignable.length>0){
         mapped=mapped.map(function(t,i){return Object.assign({},t,{reviewer:assignable[i%assignable.length]});});
       }
@@ -4049,11 +4057,16 @@ Rules:
           }
           var activeVal = (props.Active||{}).checkbox;
           var active = activeVal !== false; // default true if not set
+          // "Assign Audits" — unchecked means this user stays Full/Edit but receives no
+          // round-robin assignments and no calibration tickets. Default true when the
+          // property is absent so existing users keep their current behaviour.
+          var assignVal = (props["Assign Audits"]||{}).checkbox;
+          var assignAudits = assignVal !== false;
           var notesArr = (props.Notes||{}).rich_text||[];
           var notes = notesArr[0]&&notesArr[0].text ? notesArr[0].text.content.trim() : "";
           if(email) users.push({
             notionPageId: page.id,
-            email, name: name||email.split("@")[0], role, active, notes,
+            email, name: name||email.split("@")[0], role, active, assignAudits, notes,
             agentName: name // display_name = Gorgias agent name by convention
           });
         });
@@ -4086,6 +4099,7 @@ Rules:
       "Name":  {rich_text:[{text:{content:userData.name}}]},
       "Role":  {rich_text:[{text:{content:userData.role}}]},
       "Active":{checkbox:true},
+      "Assign Audits":{checkbox: userData.assignAudits !== false},
     };
     if(userData.notes) props["Notes"] = {rich_text:[{text:{content:userData.notes}}]};
     await notionAPI("/v1/pages","POST",{parent:{database_id:dbId},properties:props});
@@ -4096,6 +4110,7 @@ Rules:
     if(fields.name  !== undefined) props["Name"]   = {rich_text:[{text:{content:fields.name}}]};
     if(fields.role  !== undefined) props["Role"]   = {rich_text:[{text:{content:fields.role}}]};
     if(fields.active!== undefined) props["Active"] = {checkbox:fields.active};
+    if(fields.assignAudits !== undefined) props["Assign Audits"] = {checkbox:fields.assignAudits};
     if(fields.notes !== undefined) props["Notes"]  = {rich_text:[{text:{content:fields.notes}}]};
     await notionAPI("/v1/pages/"+notionPageId,"PATCH",{properties:props});
   }
@@ -4148,6 +4163,20 @@ Rules:
 
   // Derive effective user list for app logic — merge Notion users with hardcoded fallback
   var effectiveUsers = userList.length > 0 ? userList : hardcodedUsersArray();
+
+  // Single source of truth for "who can be given QA work" — round-robin assignment on
+  // both ingest paths AND Team Calibration participation. Three copies of this filter
+  // is how the FIELD_CR duplication bug happened, so it lives in one place.
+  // Excludes: non-auditor roles, deactivated users (previously only blocked at login,
+  // so they still got tickets round-robined to them that nobody could open), and
+  // anyone with "Assign Audits" unchecked in the QA Users DB.
+  function assignableAuditors() {
+    return effectiveUsers.filter(function(u){
+      return (u.role === "full" || u.role === "edit")
+        && u.active !== false
+        && u.assignAudits !== false;
+    });
+  }
 
   // ── GORGIAS FETCH ────────────────────────────────────────────────────────────
   async function gorgiasAPI(endpoint, params, method) {
@@ -4761,7 +4790,7 @@ Rules:
     var mapped = fetchedTickets.map(mapFetchedToQA);
     // Auto-assign evenly across all Full+Edit users (round-robin), same as the CSV upload path,
     // so each auditor gets the same number of tickets as much as possible (counts differ by <=1).
-    var assignable = effectiveUsers.filter(function(u){return u.role==="full"||u.role==="edit";}).map(function(u){return u.name;});
+    var assignable = assignableAuditors().map(function(u){return u.name;});
     if(assignable.length>0){
       mapped = mapped.map(function(t,i){return Object.assign({},t,{reviewer:assignable[i%assignable.length]});});
     }
@@ -4976,7 +5005,7 @@ Rules:
     setCalibGenerating(true);
     try {
       var weekTickets = tickets.filter(function(t){return t.week===weekLabel;});
-      var activeAuditors = effectiveUsers.filter(function(u){return u.role==="edit"||u.role==="full";});
+      var activeAuditors = assignableAuditors();
       if(!activeAuditors.length){ addToast("No active Edit/Full auditors found","error"); setCalibGenerating(false); return; }
       var pool=[], skipped=[];
       activeAuditors.forEach(function(u){
@@ -8361,8 +8390,8 @@ Rules:
                     </div>
                     <div style={{border:"0.5px solid var(--color-border-tertiary)",borderRadius:"var(--border-radius-lg)",overflow:"hidden"}}>
                       {/* Table header */}
-                      <div style={{display:"grid",gridTemplateColumns:"1fr 140px 100px 80px",gap:"0",padding:"8px 14px",background:"var(--color-background-secondary)",borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
-                        {["Name / Email","Agent Name","Role",""].map(function(h,i){return <span key={i} style={{fontSize:"10px",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.07em",color:"var(--color-text-secondary)"}}>{h}</span>;})}
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 140px 100px 90px 80px",gap:"0",padding:"8px 14px",background:"var(--color-background-secondary)",borderBottom:"0.5px solid var(--color-border-tertiary)"}}>
+                        {["Name / Email","Agent Name","Role","Assign audits",""].map(function(h,i){return <span key={i} style={{fontSize:"10px",fontWeight:700,textTransform:"uppercase",letterSpacing:"0.07em",color:"var(--color-text-secondary)"}}>{h}</span>;})}
                       </div>
                       {/* Rows */}
                       {userList.length===0&&(
@@ -8372,7 +8401,7 @@ Rules:
                         var initials=u.name.split(" ").map(function(w){return w[0];}).join("").slice(0,2).toUpperCase();
                         var isCurrentUser=currentUser&&u.email===currentUser.email;
                         return(
-                          <div key={u.email} style={{display:"grid",gridTemplateColumns:"1fr 140px 100px 80px",gap:"0",padding:"12px 14px",borderBottom:idx<userList.length-1?"0.5px solid var(--color-border-tertiary)":"none",alignItems:"center",background:isCurrentUser?"var(--color-background-info)":"transparent"}}>
+                          <div key={u.email} style={{display:"grid",gridTemplateColumns:"1fr 140px 100px 90px 80px",gap:"0",padding:"12px 14px",borderBottom:idx<userList.length-1?"0.5px solid var(--color-border-tertiary)":"none",alignItems:"center",background:isCurrentUser?"var(--color-background-info)":"transparent"}}>
                             {/* Name + email */}
                             <div style={{display:"flex",alignItems:"center",gap:"10px"}}>
                               <div style={{width:"30px",height:"30px",borderRadius:"50%",background:"var(--color-background-secondary)",border:"0.5px solid var(--color-border-secondary)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:"11px",fontWeight:700,color:"var(--color-text-secondary)",flexShrink:0}}>
@@ -8418,6 +8447,24 @@ Rules:
                                   border:"0.5px solid "+(u.role==="full"?"var(--color-border-info)":u.role==="edit"?"var(--color-border-success)":"var(--color-border-secondary)")
                                 }}>{u.role==="full"?"Full":u.role==="edit"?"Edit":u.role==="agent"?"Agent":"View"}</span>
                               )}
+                            </div>
+                            {/* Assign audits — only meaningful for auditor roles */}
+                            <div>
+                              {(u.role==="full"||u.role==="edit")?(
+                                isFullAccess?(
+                                  <label style={{display:"flex",alignItems:"center",gap:"5px",fontSize:"11px",cursor:"pointer"}}>
+                                    <input type="checkbox" checked={u.assignAudits!==false}
+                                      onChange={function(e){updateUserField(u.email,"assignAudits",e.target.checked);}}/>
+                                    <span style={{color:u.assignAudits===false?"var(--color-text-warning)":"var(--color-text-secondary)"}}>
+                                      {u.assignAudits===false?"Excluded":"Yes"}
+                                    </span>
+                                  </label>
+                                ):(
+                                  <span style={{fontSize:"11px",color:u.assignAudits===false?"var(--color-text-warning)":"var(--color-text-secondary)"}}>
+                                    {u.assignAudits===false?"Excluded":"Yes"}
+                                  </span>
+                                )
+                              ):(<span style={{fontSize:"11px",color:"var(--color-text-secondary)"}}>—</span>)}
                             </div>
                             {/* Remove */}
                             <div style={{textAlign:"right"}}>
